@@ -62,7 +62,9 @@ export function normalizeScript(input: string | ScriptEntry[]): ScriptEntry[] {
 	}
 
 	if (!compact.length || compact[0].frame !== 0) {
-		compact.unshift({ frame: 0, input: '.' });
+		compact.unshift({ frame: 0, input: 'LR' });
+	} else if (compact[0].input === '.') {
+		compact[0] = { ...compact[0], input: 'LR' };
 	}
 
 	return compact;

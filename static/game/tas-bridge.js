@@ -158,7 +158,9 @@
 		}
 
 		if (!compact.length || compact[0].frame !== 0) {
-			compact.unshift({ frame: 0, input: '.' });
+			compact.unshift({ frame: 0, input: 'LR' });
+		} else if (compact[0].input === '.') {
+			compact[0] = { ...compact[0], input: 'LR' };
 		}
 
 		return compact;
@@ -803,6 +805,10 @@
 		return 0;
 	}
 
+	function overlayInput(nativeValue, virtualValue) {
+		return nativeValue > 0.5 || virtualValue > 0.5 ? 1 : 0;
+	}
+
 	function sameGameInstance(a, b) {
 		if (!a || !b) return false;
 		if (a === b) return true;
@@ -848,32 +854,36 @@
 		if (inputCheckName) {
 			state.originalInputCheck = W[inputCheckName];
 			W[inputCheckName] = function patchedInputCheck(self, other, code) {
-				if (shouldUseVirtualInput.call(this, self, code)) return virtualCheck(code);
-				return state.originalInputCheck.apply(this, arguments);
+				const nativeValue = state.originalInputCheck.apply(this, arguments);
+				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
+				return overlayInput(nativeValue, virtualCheck(code));
 			};
 		}
 
 		if (inputPressedName) {
 			state.originalInputPressed = W[inputPressedName];
 			W[inputPressedName] = function patchedInputPressed(self, other, code) {
-				if (shouldUseVirtualInput.call(this, self, code)) return virtualPressed(code);
-				return state.originalInputPressed.apply(this, arguments);
+				const nativeValue = state.originalInputPressed.apply(this, arguments);
+				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
+				return overlayInput(nativeValue, virtualPressed(code));
 			};
 		}
 
 		if (typeof W._R4 === 'function') {
 			state.originalPokiInputCheck = W._R4;
 			W._R4 = function patchedPokiInputCheck(self, other, code) {
-				if (shouldUseVirtualInput.call(this, self, code)) return virtualCheck(code);
-				return state.originalPokiInputCheck.apply(this, arguments);
+				const nativeValue = state.originalPokiInputCheck.apply(this, arguments);
+				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
+				return overlayInput(nativeValue, virtualCheck(code));
 			};
 		}
 
 		if (typeof W._S4 === 'function') {
 			state.originalPokiInputPressed = W._S4;
 			W._S4 = function patchedPokiInputPressed(self, other, code) {
-				if (shouldUseVirtualInput.call(this, self, code)) return virtualPressed(code);
-				return state.originalPokiInputPressed.apply(this, arguments);
+				const nativeValue = state.originalPokiInputPressed.apply(this, arguments);
+				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
+				return overlayInput(nativeValue, virtualPressed(code));
 			};
 		}
 

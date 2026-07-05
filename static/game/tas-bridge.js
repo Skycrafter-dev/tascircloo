@@ -43,9 +43,12 @@
 		prevVirtual: { L: false, R: false },
 		domHeld: { L: false, R: false },
 		capture: [],
+		captureInputSample: null,
+		captureDebug: [],
 		lastCaptureInput: null,
 		lastFrameSeen: null,
 		lastLevelSeen: null,
+		consumedInput: '.',
 		wallFrame: 0,
 		lastDumpText: '',
 		lastCP: 0,
@@ -133,7 +136,7 @@
 			});
 	}
 
-	function normalizeScript(input) {
+	function normalizeScript(input, options = {}) {
 		const source = typeof input === 'string' ? parseScriptText(input) : Array.isArray(input) ? input : [];
 		const out = [];
 
@@ -157,10 +160,12 @@
 			}
 		}
 
-		if (!compact.length || compact[0].frame !== 0) {
-			compact.unshift({ frame: 0, input: 'LR' });
-		} else if (compact[0].input === '.') {
-			compact[0] = { ...compact[0], input: 'LR' };
+		if (!options.exact) {
+			if (!compact.length || compact[0].frame !== 0) {
+				compact.unshift({ frame: 0, input: 'LR' });
+			} else if (compact[0].input === '.') {
+				compact[0] = { ...compact[0], input: 'LR' };
+			}
 		}
 
 		return compact;
@@ -168,6 +173,31 @@
 
 	function serializeScript(script) {
 		return normalizeScript(script)
+			.map((entry) => `${entry.frame} ${entry.input}`)
+			.join('\n');
+	}
+
+	function compactCapturedScript(script) {
+		const out = [];
+		for (const entry of Array.isArray(script) ? script : []) {
+			const frame = Math.max(0, Math.round(Number(entry.frame)));
+			const input = inputOfHeld(parseInput(entry.input));
+			if (!Number.isFinite(frame) || !INPUTS.includes(input)) continue;
+			if (out.length && out[out.length - 1].frame === frame) {
+				out[out.length - 1] = { frame, input };
+			} else if (!out.length || out[out.length - 1].input !== input) {
+				out.push({ frame, input });
+			}
+		}
+		if (!out.length) return [];
+		if (out[0].frame !== 0) {
+			out.unshift({ frame: 0, input: '.' });
+		}
+		return out;
+	}
+
+	function serializeCapturedScript(script) {
+		return compactCapturedScript(script)
 			.map((entry) => `${entry.frame} ${entry.input}`)
 			.join('\n');
 	}
@@ -647,6 +677,7 @@
 		const big = gmBig();
 		const frame = gameFrame();
 		const level = gmLevel();
+		const activeInput = state.playbackMode ? inputOfHeld(state.virtual) : state.consumedInput;
 		return {
 			sequence: state.runLogSequence++,
 			wallFrame: state.wallFrame,
@@ -656,7 +687,7 @@
 			cp: currentCP(),
 			cpTimes: state.cpTimes.slice(),
 			input: {
-				active: state.playbackMode ? inputOfHeld(state.virtual) : liveInput(),
+				active: activeInput,
 				virtual: { ...state.virtual },
 				prevVirtual: { ...state.prevVirtual },
 				domHeld: { ...state.domHeld },
@@ -749,6 +780,10 @@
 			settings: {
 				script: state.script.slice()
 			},
+			capture: {
+				script: compactCapturedScript(state.capture),
+				debug: state.captureDebug.slice()
+			},
 			currentTelemetry: telemetry(),
 			frames: state.runLog
 		};
@@ -833,6 +868,84 @@
 		return sameGameInstance(self, player) || sameGameInstance(this, player);
 	}
 
+	function inputCheckGroupDone(code, value) {
+		const numeric = Number(code);
+		const pressed = Number(value) > 0.5;
+		return numeric === 65 || numeric === 68 || ((numeric === 37 || numeric === 39) && pressed);
+	}
+
+	function recordCaptureInput(frame, input) {
+		if (state.playbackMode) return;
+		if (!hasPlayer()) return;
+		if (!Number.isFinite(frame)) return;
+
+		const level = gmLevel();
+		if (state.lastLevelSeen !== null && level !== state.lastLevelSeen) resetCapture();
+		if (state.lastFrameSeen !== null && frame < state.lastFrameSeen - 3) resetCapture();
+
+		state.lastFrameSeen = frame;
+		state.lastLevelSeen = level;
+		state.consumedInput = input;
+
+		if (state.lastCaptureInput === null || input !== state.lastCaptureInput) {
+			state.capture.push({ frame, input });
+			state.lastCaptureInput = input;
+		}
+	}
+
+	function captureInputCheck(self, code, value) {
+		if (!shouldCaptureInput.call(this, self, code)) return;
+		const frame = gameFrame();
+		const numeric = Number(code);
+		const pressed = Number(value) > 0.5;
+		const level = gmLevel();
+
+		if (
+			!state.captureInputSample ||
+			state.captureInputSample.frame !== frame ||
+			state.captureInputSample.level !== level
+		) {
+			state.captureInputSample = {
+				frame,
+				level,
+				L: false,
+				R: false,
+				seenL: false,
+				seenR: false
+			};
+		}
+
+		const sample = state.captureInputSample;
+		if (numeric === 37 || numeric === 65) {
+			if (pressed) sample.L = true;
+			if (inputCheckGroupDone(numeric, value)) sample.seenL = true;
+		}
+		if (numeric === 39 || numeric === 68) {
+			if (pressed) sample.R = true;
+			if (inputCheckGroupDone(numeric, value)) sample.seenR = true;
+		}
+
+		pushCaptureDebug({
+			wallFrame: state.wallFrame,
+			level,
+			frame,
+			code: numeric,
+			value: pressed ? 1 : 0,
+			input: inputOfHeld(sample),
+			seenL: sample.seenL,
+			seenR: sample.seenR
+		});
+
+		if (sample.seenL && sample.seenR) {
+			recordCaptureInput(frame, inputOfHeld(sample));
+		}
+	}
+
+	function pushCaptureDebug(event) {
+		state.captureDebug.push(event);
+		if (state.captureDebug.length > 4000) state.captureDebug.shift();
+	}
+
 	function nativeInputHeld(code) {
 		const check = state.originalInputCheck || (typeof W._J3 === 'function' ? W._J3 : null);
 		if (typeof check !== 'function') return false;
@@ -865,7 +978,7 @@
 			state.originalInputCheck = W[inputCheckName];
 			W[inputCheckName] = function patchedInputCheck(self, other, code) {
 				const nativeValue = state.originalInputCheck.apply(this, arguments);
-				if (shouldCaptureInput.call(this, self, code)) sampleCapture(gameFrame());
+				captureInputCheck.call(this, self, code, nativeValue);
 				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
 				return overlayInput(nativeValue, virtualCheck(code));
 			};
@@ -875,7 +988,6 @@
 			state.originalInputPressed = W[inputPressedName];
 			W[inputPressedName] = function patchedInputPressed(self, other, code) {
 				const nativeValue = state.originalInputPressed.apply(this, arguments);
-				if (shouldCaptureInput.call(this, self, code)) sampleCapture(gameFrame());
 				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
 				return overlayInput(nativeValue, virtualPressed(code));
 			};
@@ -885,7 +997,7 @@
 			state.originalPokiInputCheck = W._R4;
 			W._R4 = function patchedPokiInputCheck(self, other, code) {
 				const nativeValue = state.originalPokiInputCheck.apply(this, arguments);
-				if (shouldCaptureInput.call(this, self, code)) sampleCapture(gameFrame());
+				captureInputCheck.call(this, self, code, nativeValue);
 				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
 				return overlayInput(nativeValue, virtualCheck(code));
 			};
@@ -895,7 +1007,6 @@
 			state.originalPokiInputPressed = W._S4;
 			W._S4 = function patchedPokiInputPressed(self, other, code) {
 				const nativeValue = state.originalPokiInputPressed.apply(this, arguments);
-				if (shouldCaptureInput.call(this, self, code)) sampleCapture(gameFrame());
 				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
 				return overlayInput(nativeValue, virtualPressed(code));
 			};
@@ -958,31 +1069,15 @@
 
 	function resetCapture() {
 		state.capture = [];
+		state.captureInputSample = null;
+		state.captureDebug = [];
 		state.lastCaptureInput = null;
 		state.lastFrameSeen = hasPlayer() ? gameFrame() : null;
 		state.lastLevelSeen = gmLevel();
+		state.consumedInput = '.';
 		state.collectedCP = radiusCP();
 		state.lastCP = currentCP();
 		state.cpTimes = [];
-	}
-
-	function sampleCapture(frame = gameFrame()) {
-		if (state.playbackMode) return;
-		if (!hasPlayer()) return;
-		if (!Number.isFinite(frame)) return;
-
-		const level = gmLevel();
-		if (state.lastLevelSeen !== null && level !== state.lastLevelSeen) resetCapture();
-		if (state.lastFrameSeen !== null && frame < state.lastFrameSeen - 3) resetCapture();
-
-		state.lastFrameSeen = frame;
-		state.lastLevelSeen = level;
-
-		const input = liveInput();
-		if (state.lastCaptureInput === null || input !== state.lastCaptureInput) {
-			state.capture.push({ frame, input });
-			state.lastCaptureInput = input;
-		}
 	}
 
 	function currentRunScript() {
@@ -992,8 +1087,7 @@
 			return script.length ? script : [{ frame: 0, input: inputOfHeld(state.virtual) }];
 		}
 
-		sampleCapture();
-		return state.capture;
+		return compactCapturedScript(state.capture);
 	}
 
 	function updateCheckpointTracking() {
@@ -1033,7 +1127,7 @@
 			frame: captureFrame(),
 			cp: currentCP(),
 			cpTimes: state.cpTimes.slice(),
-			input: state.playbackMode ? inputOfHeld(state.virtual) : liveInput(),
+			input: state.playbackMode ? inputOfHeld(state.virtual) : state.consumedInput,
 			velocity: { ...state.velocity },
 			captured: state.capture.length,
 			playbackMode: state.playbackMode,
@@ -1042,15 +1136,18 @@
 		};
 	}
 
-	function armReplay(script) {
+	function armReplay(script, options = {}) {
 		resetRunLog('replay-armed');
-		state.script = normalizeScript(script);
+		state.script = normalizeScript(script, options);
 		state.virtualEnabled = true;
 		state.playbackMode = true;
 		state.paused = false;
 		resetPlayback();
 		setVirtualInput('.');
-		post('SCRIPT_NORMALIZED', { script: state.script, text: serializeScript(state.script) });
+		post('SCRIPT_NORMALIZED', {
+			script: state.script,
+			text: options.exact ? serializeCapturedScript(state.script) : serializeScript(state.script)
+		});
 	}
 
 	function stopReplay() {
@@ -1292,7 +1389,7 @@
 				post('SCRIPT_NORMALIZED', { script: state.script, text: serializeScript(state.script) });
 				break;
 			case 'ARM_REPLAY':
-				armReplay(message.script ?? message.text);
+				armReplay(message.script ?? message.text, { exact: !!message.exact });
 				break;
 			case 'PAUSE_REPLAY':
 				setPaused(message.paused);
@@ -1306,11 +1403,13 @@
 				break;
 			case 'DUMP_CAPTURE': {
 				const script = currentRunScript();
-				const text = serializeScript(script);
+				const text = serializeCapturedScript(script);
 				state.lastDumpText = text;
 				post('CAPTURE_DUMP', {
-					script: normalizeScript(script),
-					text
+					script: compactCapturedScript(script),
+					text,
+					exact: true,
+					debug: state.captureDebug.slice()
 				});
 				break;
 			}

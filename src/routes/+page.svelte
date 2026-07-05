@@ -20,6 +20,7 @@
 	import { gameTime, normalizeScript, serializeScript, type ScriptEntry } from '$lib/tas/script';
 
 	const defaultText = '';
+	const scriptKey = 'circloo-tas:script';
 	const settingsKey = 'circloo-tas:bruteforce-settings';
 
 	let iframeEl = $state<HTMLIFrameElement | null>(null);
@@ -147,9 +148,14 @@
 		}
 	}
 
-	function handleScriptInput(event: Event) {
-		scriptText = (event.currentTarget as HTMLTextAreaElement).value;
+	function setScriptText(nextText: string) {
+		scriptText = nextText;
+		localStorage.setItem(scriptKey, scriptText);
 		syncReplayFromEditor(scriptText);
+	}
+
+	function handleScriptInput(event: Event) {
+		setScriptText((event.currentTarget as HTMLTextAreaElement).value);
 	}
 
 	function recoverInputs() {
@@ -240,8 +246,7 @@
 				if (hadImprovement) {
 					setStatus(`Improved to ${gameTime(message.bestScore)}`);
 					if (settings.autoUseBest) {
-						scriptText = serializeScript(message.bestScript);
-						syncReplayFromEditor(scriptText);
+						setScriptText(serializeScript(message.bestScript));
 					}
 				}
 				break;
@@ -267,7 +272,7 @@
 		if (!base.length) return setError('No script to bruteforce');
 
 		saveSettings();
-		scriptText = serializeScript(base);
+		setScriptText(serializeScript(base));
 		bruteforce.running = true;
 		bruteforce.best = base;
 		bruteforce.bestScore = Infinity;
@@ -295,8 +300,7 @@
 
 	function useBest() {
 		if (!bruteforce.best.length) return setError('No bruteforce best script yet');
-		scriptText = serializeScript(bruteforce.best);
-		syncReplayFromEditor(scriptText);
+		setScriptText(serializeScript(bruteforce.best));
 		setStatus('Loaded bruteforce best');
 	}
 
@@ -330,6 +334,8 @@
 
 	onMount(() => {
 		loadSettings();
+		scriptText = localStorage.getItem(scriptKey) ?? defaultText;
+		syncReplayFromEditor(scriptText);
 		window.addEventListener('message', handleGameMessage);
 		return () => {
 			window.removeEventListener('message', handleGameMessage);

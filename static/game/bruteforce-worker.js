@@ -498,6 +498,6 @@
 	importScripts('/game/html5game_a5/uph_quickTextRender.js?v=1');
 	importScripts('/game/html5game_a5/vph_HTML5Link.js?v=1');
 	W.drawCanvasTextFast = noop;
-	importScripts('/game/html5game_a5/circloo.js?v=5');
+	importScripts('/game/html5game_a5/circloo.js?v=6');
 	if (typeof W.GameMaker_Init === 'function') W.GameMaker_Init();
 })();

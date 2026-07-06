@@ -48,6 +48,10 @@
 		prestartElapsed: 0,
 		unfreezeSource: 'none',
 		freezeLevel: null,
+		freezeRoom: null,
+		freezeLastFrame: null,
+		freezePlayerId: null,
+		freezeBigId: null,
 		virtual: { L: false, R: false },
 		prevVirtual: { L: false, R: false },
 		domHeld: { L: false, R: false },
@@ -84,6 +88,7 @@
 	W.__circlooTasBridge = state;
 
 	W.__circlooTasShouldStepPhysics = () => shouldStepPhysics();
+	W.__circlooTasShouldFreezeRoomUpdate = () => shouldFreezeRoomUpdate();
 
 	function post(type, payload = {}) {
 		if (W.parent && W.parent !== W) {
@@ -337,6 +342,10 @@
 		);
 	}
 
+	function freezeApplies() {
+		return simRoomId() === 5 && simHasPhysicsWorld() && !!gmBig();
+	}
+
 	function resetFreeze(level = gmLevel()) {
 		state.physicsFrozen = true;
 		state.unfreezeStarted = false;
@@ -344,6 +353,10 @@
 		state.prestartElapsed = 0;
 		state.unfreezeSource = 'none';
 		state.freezeLevel = level;
+		state.freezeRoom = simRoomId();
+		state.freezeLastFrame = Number.isFinite(gameFrame()) ? gameFrame() : null;
+		state.freezePlayerId = finiteNumber(gmPlayer() && gmPlayer().id);
+		state.freezeBigId = finiteNumber(gmBig() && gmBig().id);
 		state.scriptUnfreezeConsumed = false;
 		setVirtualInput('.');
 	}
@@ -359,10 +372,11 @@
 		state.prestartRemaining = Math.max(0, Math.floor(Number(frames) || 0));
 		state.prestartElapsed = 0;
 		state.unfreezeSource = source;
+		updateFreezeHint();
 	}
 
 	function requestManualUnfreeze() {
-		if (!hasPlayer()) return false;
+		if (!freezeApplies()) return false;
 		if (state.prestartRemaining > 0) return false;
 		beginUnfreeze(0, 'manual');
 		return true;
@@ -380,22 +394,52 @@
 	}
 
 	function prestartReady() {
-		return hasPlayer() && state.unfreezeStarted && state.prestartRemaining <= 0;
+		return freezeApplies() && state.unfreezeStarted && state.prestartRemaining <= 0;
 	}
 
 	function inputLocked() {
-		return hasPlayer() && !prestartReady();
+		return freezeApplies() && !prestartReady();
 	}
 
-	function syncFreezeLevel() {
+	function syncFreezeLifecycle() {
+		const room = simRoomId();
 		const level = gmLevel();
-		if (state.freezeLevel !== null && level !== state.freezeLevel) resetFreeze(level);
-		else if (state.freezeLevel === null) state.freezeLevel = level;
+		const frame = gameFrame();
+		const playerId = finiteNumber(gmPlayer() && gmPlayer().id);
+		const bigId = finiteNumber(gmBig() && gmBig().id);
+		const roomChanged = state.freezeRoom !== null && room !== state.freezeRoom;
+		const levelChanged = state.freezeLevel !== null && level !== state.freezeLevel;
+		const frameRewind =
+			state.freezeLastFrame !== null &&
+			Number.isFinite(frame) &&
+			frame < state.freezeLastFrame - 3;
+		const playerChanged =
+			state.unfreezeStarted &&
+			state.freezePlayerId !== null &&
+			playerId !== null &&
+			playerId !== state.freezePlayerId;
+		const bigChanged =
+			state.unfreezeStarted &&
+			state.freezeBigId !== null &&
+			bigId !== null &&
+			bigId !== state.freezeBigId;
+
+		if (roomChanged || levelChanged || frameRewind || playerChanged || bigChanged) {
+			rememberRecoveredRun('freeze-lifecycle-reset');
+			resetFreeze(level);
+		} else {
+			if (state.freezeRoom === null) state.freezeRoom = room;
+			if (state.freezeLevel === null) state.freezeLevel = level;
+			if (state.freezePlayerId === null && playerId !== null) state.freezePlayerId = playerId;
+			if (state.freezeBigId === null && bigId !== null) state.freezeBigId = bigId;
+		}
+
+		if (Number.isFinite(frame)) state.freezeLastFrame = frame;
 	}
 
 	function shouldStepPhysics() {
-		if (!hasPlayer()) return true;
-		syncFreezeLevel();
+		if (!freezeApplies()) return true;
+		syncFreezeLifecycle();
 		maybeConsumeScriptUnfreeze();
 		if (!state.unfreezeStarted) {
 			state.physicsFrozen = true;
@@ -405,6 +449,32 @@
 		if (gameFrame() === 0) state.prestartElapsed++;
 		if (state.prestartRemaining > 0) state.prestartRemaining--;
 		return true;
+	}
+
+	function shouldFreezeRoomUpdate() {
+		if (!freezeApplies()) return false;
+		syncFreezeLifecycle();
+		return !state.unfreezeStarted;
+	}
+
+	function freezeSnapshot() {
+		return {
+			applies: freezeApplies(),
+			room: simRoomId(),
+			level: gmLevel(),
+			lastFrame: state.freezeLastFrame,
+			playerId: state.freezePlayerId,
+			bigId: state.freezeBigId,
+			hasPlayer: hasPlayer(),
+			hasBig: !!gmBig(),
+			hasPhysicsWorld: simHasPhysicsWorld(),
+			physicsFrozen: state.physicsFrozen,
+			roomUpdateFrozen: shouldFreezeRoomUpdate(),
+			unfreezeStarted: state.unfreezeStarted,
+			prestartRemaining: state.prestartRemaining,
+			prestartElapsed: state.prestartElapsed,
+			unfreezeSource: state.unfreezeSource
+		};
 	}
 
 	function simRoomId() {
@@ -455,6 +525,42 @@
 				if (gain && gain.gain) gain.gain.value = state.volume;
 			} catch {}
 		}
+	}
+
+	function ensureFreezeHint() {
+		if (IS_SIM) return null;
+		let hint = D.getElementById('circloo-tas-freeze-hint');
+		if (hint) return hint;
+
+		hint = D.createElement('div');
+		hint.id = 'circloo-tas-freeze-hint';
+		hint.textContent = 'Press U to unfreeze or script it like: "-122 U\n0 L..."';
+		Object.assign(hint.style, {
+			position: 'fixed',
+			left: '50%',
+			top: '18px',
+			transform: 'translateX(-50%)',
+			zIndex: '100000',
+			padding: '7px 10px',
+			borderRadius: '6px',
+			background: 'rgba(15, 18, 24, 0.82)',
+			color: '#f4f6fb',
+			font: '600 13px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif',
+			letterSpacing: '0',
+			boxShadow: '0 6px 18px rgba(0, 0, 0, 0.28)',
+			pointerEvents: 'none',
+			userSelect: 'none',
+			whiteSpace: 'pre-line',
+			display: 'none'
+		});
+		D.body.appendChild(hint);
+		return hint;
+	}
+
+	function updateFreezeHint() {
+		const hint = ensureFreezeHint();
+		if (!hint) return;
+		hint.style.display = freezeApplies() && !state.unfreezeStarted ? 'block' : 'none';
 	}
 
 	function physicsWrapper() {
@@ -781,13 +887,7 @@
 				playLastFrame: state.playLastFrame,
 				playLevel: state.playLevel
 			},
-			freeze: {
-				physicsFrozen: state.physicsFrozen,
-				unfreezeStarted: state.unfreezeStarted,
-				prestartRemaining: state.prestartRemaining,
-				prestartElapsed: state.prestartElapsed,
-				unfreezeSource: state.unfreezeSource
-			},
+			freeze: freezeSnapshot(),
 			player: player ? primitiveFields(player, 180) : null,
 			big: big ? primitiveFields(big, 120) : null,
 			runtime: runtimeSnapshot(),
@@ -1190,10 +1290,49 @@
 		return true;
 	}
 
+	function patchRoomFreezeHooks() {
+		return !!callGlobal(
+			[
+				'if (typeof __11 === "undefined" || !__11 || __11.__circlooTasFreezePatched) return !!(__11 && __11.__circlooTasFreezePatched);',
+				'__11.__circlooTasFreezePatched = true;',
+				'var manager = __11;',
+				'var shouldFreeze = function() {',
+				'  return !!(typeof window !== "undefined" && window.__circlooTasShouldFreezeRoomUpdate && window.__circlooTasShouldFreezeRoomUpdate());',
+				'};',
+				'var stepEvents = {};',
+				'try { stepEvents[_no2] = true; } catch (error) {}',
+				'try { stepEvents[_po2] = true; } catch (error) {}',
+				'try { stepEvents[_ro2] = true; } catch (error) {}',
+				'if (typeof manager._TO2 === "function") {',
+				'  var originalTO2 = manager._TO2;',
+				'  manager._TO2 = function() { if (shouldFreeze()) return; return originalTO2.apply(this, arguments); };',
+				'}',
+				'if (typeof manager._VO2 === "function") {',
+				'  var originalVO2 = manager._VO2;',
+				'  manager._VO2 = function() { if (shouldFreeze()) return; return originalVO2.apply(this, arguments); };',
+				'}',
+				'if (typeof manager._Hy === "function") {',
+				'  var originalHy = manager._Hy;',
+				'  manager._Hy = function(event) {',
+				'    if (shouldFreeze() && stepEvents[event]) return true;',
+				'    return originalHy.apply(this, arguments);',
+				'  };',
+				'}',
+				'if (typeof _Q71 !== "undefined" && _Q71 && typeof _Q71._m81 === "function" && !_Q71.__circlooTasFreezePatched) {',
+				'  _Q71.__circlooTasFreezePatched = true;',
+				'  var originalTimelineStep = _Q71._m81;',
+				'  _Q71._m81 = function() { if (shouldFreeze()) return; return originalTimelineStep.apply(this, arguments); };',
+				'}',
+				'return true;'
+			].join('\n')
+		);
+	}
+
 	function patchGameHooks() {
 		const inputPatched = patchInput();
 		patchCollectCircle();
 		patchPlayerCreate();
+		patchRoomFreezeHooks();
 		return inputPatched;
 	}
 
@@ -1299,13 +1438,7 @@
 			playbackMode: state.playbackMode,
 			paused: state.paused,
 			sim: IS_SIM,
-			freeze: {
-				physicsFrozen: state.physicsFrozen,
-				unfreezeStarted: state.unfreezeStarted,
-				prestartRemaining: state.prestartRemaining,
-				prestartElapsed: state.prestartElapsed,
-				unfreezeSource: state.unfreezeSource
-			}
+			freeze: freezeSnapshot()
 		};
 	}
 
@@ -1546,6 +1679,7 @@
 		patchGameHooks();
 		updateCheckpointTracking();
 		updateVelocity();
+		updateFreezeHint();
 		recordRunFrame();
 		post('TELEMETRY', telemetry());
 		REAL.raf(monitorTick);

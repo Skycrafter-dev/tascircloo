@@ -1688,25 +1688,63 @@
 	}
 
 	function prepareSimTrialLevel(level) {
+		const targetLevel = Math.max(0, Number(level) || 0);
+		const startPlayerId = finiteNumber(gmPlayer() && gmPlayer().id);
 		const debug = {
 			prepPumps: 0,
+			restartPumps: 0,
 			startRadius: radiusCP(),
+			startFrame: gameFrame(),
+			startPlayerId,
 			endRadius: null,
 			endFrame: null,
+			endPlayerId: null,
 			ready: false
 		};
-		tryStartLevel(level);
-		resetFreeze(gmLevel());
-		for (let i = 0; i < 180; i++) {
-			if (hasPlayer() && radiusCP() === 0) break;
+
+		function freshLevelReady() {
+			const player = gmPlayer();
+			const playerId = finiteNumber(player && player.id);
+			return (
+				gmLevel() === targetLevel &&
+				!!player &&
+				(startPlayerId === null || playerId !== startPlayerId) &&
+				radiusCP() === 0 &&
+				gameFrame() === 0
+			);
+		}
+
+		function allowPrepPump() {
+			state.physicsFrozen = false;
+			state.unfreezeStarted = true;
+			state.prestartRemaining = 0;
+			state.prestartElapsed = 0;
+			state.unfreezeSource = 'sim-prep';
+		}
+
+		tryStartLevel(targetLevel);
+		allowPrepPump();
+		for (let i = 0; i < 180 && !freshLevelReady(); i++) {
+			if (i > 0 && i % 30 === 0) tryStartLevel(targetLevel);
 			W.__circlooTasPumpFrame();
 			debug.prepPumps++;
+			allowPrepPump();
 		}
-		tryStartLevel(level);
+
+		tryStartLevel(targetLevel);
+		allowPrepPump();
+		for (let i = 0; i < 180 && !freshLevelReady(); i++) {
+			if (i > 0 && i % 30 === 0) tryStartLevel(targetLevel);
+			W.__circlooTasPumpFrame();
+			debug.restartPumps++;
+			allowPrepPump();
+		}
 		resetFreeze(gmLevel());
+
 		debug.endRadius = radiusCP();
 		debug.endFrame = gameFrame();
-		debug.ready = hasPlayer() && radiusCP() === 0;
+		debug.endPlayerId = finiteNumber(gmPlayer() && gmPlayer().id);
+		debug.ready = freshLevelReady();
 		return debug;
 	}
 

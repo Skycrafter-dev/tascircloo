@@ -54,6 +54,10 @@
 		capture: [],
 		captureInputSample: null,
 		captureDebug: [],
+		lastRecoveredScript: [],
+		lastRecoveredDebug: [],
+		lastRecoveredReason: '',
+		lastRecoveredAt: null,
 		lastCaptureInput: null,
 		lastFrameSeen: null,
 		lastLevelSeen: null,
@@ -758,7 +762,7 @@
 		const big = gmBig();
 		const frame = gameFrame();
 		const level = gmLevel();
-		const activeInput = state.playbackMode ? inputOfHeld(state.virtual) : state.consumedInput;
+		const activeInput = effectiveInput();
 		return {
 			sequence: state.runLogSequence++,
 			wallFrame: state.wallFrame,
@@ -803,6 +807,7 @@
 	}
 
 	function beginFreshRun(reason = 'run-start') {
+		rememberRecoveredRun(reason);
 		resetRunLog(reason);
 		state.collectedCP = radiusCP();
 		state.lastCP = currentCP();
@@ -872,8 +877,8 @@
 				script: state.script.slice()
 			},
 			capture: {
-				script: recoveredCaptureScript(),
-				debug: state.captureDebug.slice()
+				script: currentRunScript(),
+				debug: currentRunDebug()
 			},
 			currentTelemetry: telemetry(),
 			frames: state.runLog
@@ -964,7 +969,7 @@
 	}
 
 	function shouldCaptureInput(self, code) {
-		if (state.playbackMode || state.paused || !isVirtualCode(code) || inputLocked()) return false;
+		if (IS_SIM || state.paused || !isVirtualCode(code) || inputLocked()) return false;
 		const player = gmPlayer();
 		return sameGameInstance(self, player) || sameGameInstance(this, player);
 	}
@@ -983,7 +988,6 @@
 	}
 
 	function recordCaptureInput(frame, input) {
-		if (state.playbackMode) return;
 		if (!hasPlayer()) return;
 		if (!Number.isFinite(frame)) return;
 
@@ -1077,6 +1081,15 @@
 		return inputOfHeld(liveHeld());
 	}
 
+	function effectiveInput() {
+		if (!state.playbackMode) return state.consumedInput;
+		const held = liveHeld();
+		return inputOfHeld({
+			L: state.virtual.L || held.L,
+			R: state.virtual.R || held.R
+		});
+	}
+
 	function patchInput() {
 		if (state.installed || !gameReady()) return false;
 
@@ -1088,9 +1101,11 @@
 			W[inputCheckName] = function patchedInputCheck(self, other, code) {
 				const nativeValue = state.originalInputCheck.apply(this, arguments);
 				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
-				captureInputCheck.call(this, self, code, gatedNativeValue);
-				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
-				return overlayInput(gatedNativeValue, virtualCheck(code));
+				const effectiveValue = shouldUseVirtualInput.call(this, self, code)
+					? overlayInput(gatedNativeValue, virtualCheck(code))
+					: gatedNativeValue;
+				captureInputCheck.call(this, self, code, effectiveValue);
+				return effectiveValue;
 			};
 		}
 
@@ -1109,9 +1124,11 @@
 			W._R4 = function patchedPokiInputCheck(self, other, code) {
 				const nativeValue = state.originalPokiInputCheck.apply(this, arguments);
 				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
-				captureInputCheck.call(this, self, code, gatedNativeValue);
-				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
-				return overlayInput(gatedNativeValue, virtualCheck(code));
+				const effectiveValue = shouldUseVirtualInput.call(this, self, code)
+					? overlayInput(gatedNativeValue, virtualCheck(code))
+					: gatedNativeValue;
+				captureInputCheck.call(this, self, code, effectiveValue);
+				return effectiveValue;
 			};
 		}
 
@@ -1166,7 +1183,7 @@
 		W._P8 = function patchedPlayerCreate(self, other) {
 			const result = state.originalPlayerCreate.apply(this, arguments);
 			beginFreshRun('player-create');
-			resetCapture();
+			resetCapture({ preserve: false });
 			return result;
 		};
 
@@ -1180,7 +1197,28 @@
 		return inputPatched;
 	}
 
-	function resetCapture() {
+	function recoveredCaptureScript() {
+		const script = compactCapturedScript(state.capture);
+		if (state.unfreezeStarted) {
+			script.unshift({ frame: -Math.max(0, state.prestartElapsed), input: 'U' });
+		}
+		return compactCapturedScript(script);
+	}
+
+	function rememberRecoveredRun(reason = 'capture-reset') {
+		const script = recoveredCaptureScript();
+		if (!script.length) return;
+		const hasUnfreeze = script.some((entry) => entry.input === 'U');
+		const lastHasUnfreeze = state.lastRecoveredScript.some((entry) => entry.input === 'U');
+		if (!hasUnfreeze && lastHasUnfreeze) return;
+		state.lastRecoveredScript = script.map((entry) => ({ ...entry }));
+		state.lastRecoveredDebug = state.captureDebug.slice();
+		state.lastRecoveredReason = reason;
+		state.lastRecoveredAt = Date.now();
+	}
+
+	function resetCapture(options = {}) {
+		if (options.preserve !== false) rememberRecoveredRun(options.reason || 'capture-reset');
 		state.capture = [];
 		state.captureInputSample = null;
 		state.captureDebug = [];
@@ -1193,22 +1231,29 @@
 		state.cpTimes = [];
 	}
 
-	function recoveredCaptureScript() {
-		const script = compactCapturedScript(state.capture);
-		if (state.unfreezeStarted) {
-			script.unshift({ frame: -Math.max(0, state.prestartElapsed), input: 'U' });
-		}
-		return compactCapturedScript(script);
-	}
-
 	function currentRunScript() {
 		if (state.playbackMode) {
+			const recovered = recoveredCaptureScript();
+			if (recovered.length) return recovered;
+			if (state.lastRecoveredScript.length) return state.lastRecoveredScript.map((entry) => ({ ...entry }));
 			const frame = captureFrame();
 			const script = state.script.filter((entry) => entry.frame <= frame);
 			return script.length ? script : [{ frame: 0, input: inputOfHeld(state.virtual) }];
 		}
 
-		return recoveredCaptureScript();
+		const recovered = recoveredCaptureScript();
+		return recovered.length ? recovered : state.lastRecoveredScript.map((entry) => ({ ...entry }));
+	}
+
+	function currentRunDebug() {
+		return recoveredCaptureScript().length ? state.captureDebug.slice() : state.lastRecoveredDebug.slice();
+	}
+
+	function clearRecoveredMemory() {
+		state.lastRecoveredScript = [];
+		state.lastRecoveredDebug = [];
+		state.lastRecoveredReason = '';
+		state.lastRecoveredAt = null;
 	}
 
 	function updateCheckpointTracking() {
@@ -1248,7 +1293,7 @@
 			frame: captureFrame(),
 			cp: currentCP(),
 			cpTimes: state.cpTimes.slice(),
-			input: state.playbackMode ? inputOfHeld(state.virtual) : state.consumedInput,
+			input: effectiveInput(),
 			velocity: { ...state.velocity },
 			captured: state.capture.length,
 			playbackMode: state.playbackMode,
@@ -1271,6 +1316,7 @@
 		state.playbackMode = true;
 		state.paused = false;
 		resetPlayback();
+		resetCapture({ preserve: false });
 		setVirtualInput('.');
 		post('SCRIPT_NORMALIZED', {
 			script: state.script,
@@ -1524,7 +1570,8 @@
 				stopReplay();
 				break;
 			case 'CLEAR_CAPTURE':
-				resetCapture();
+				resetCapture({ preserve: false });
+				clearRecoveredMemory();
 				post('CAPTURE_CLEARED');
 				break;
 			case 'DUMP_CAPTURE': {
@@ -1535,7 +1582,7 @@
 					script: compactCapturedScript(script),
 					text,
 					exact: true,
-					debug: state.captureDebug.slice()
+					debug: currentRunDebug()
 				});
 				break;
 			}
@@ -1663,7 +1710,7 @@
 		post('BRIDGE_LOADED', { sim: IS_SIM });
 		W.addEventListener('message', handleMessage, true);
 		installDomInputCapture();
-		resetCapture();
+		resetCapture({ preserve: false });
 
 		const wait = () => {
 			if (!gameReady()) return REAL.setTimeout(wait, 50);

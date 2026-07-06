@@ -19,6 +19,13 @@ export type Telemetry = {
 	playbackMode: boolean;
 	paused: boolean;
 	sim: boolean;
+	freeze?: {
+		physicsFrozen: boolean;
+		unfreezeStarted: boolean;
+		prestartRemaining: number;
+		prestartElapsed: number;
+		unfreezeSource: string;
+	};
 };
 
 export type BruteforceProgress = {

@@ -1,11 +1,11 @@
-export type TasInput = '.' | 'L' | 'R' | 'LR';
+export type TasInput = '.' | 'L' | 'R' | 'LR' | 'U';
 
 export type ScriptEntry = {
 	frame: number;
 	input: TasInput;
 };
 
-const validInputs = new Set<TasInput>(['.', 'L', 'R', 'LR']);
+const validInputs = new Set<TasInput>(['.', 'L', 'R', 'LR', 'U']);
 
 export function inputFromHeld(held: { L: boolean; R: boolean }): TasInput {
 	if (held.L && held.R) return 'LR';
@@ -16,10 +16,17 @@ export function inputFromHeld(held: { L: boolean; R: boolean }): TasInput {
 
 export function parseInput(value: unknown): TasInput {
 	const text = String(value || '.').toUpperCase();
+	if (text.includes('U')) return 'U';
 	return inputFromHeld({
 		L: text.includes('L') || text.includes('<'),
 		R: text.includes('R') || text.includes('>')
 	});
+}
+
+function normalizeFrame(frame: unknown, input: TasInput): number {
+	const n = Math.round(Number(frame));
+	if (!Number.isFinite(n)) return Number.NaN;
+	return input === 'U' ? Math.min(0, n) : Math.max(0, n);
 }
 
 export function parseScriptText(text: string): ScriptEntry[] {
@@ -42,29 +49,23 @@ export function normalizeScript(input: string | ScriptEntry[]): ScriptEntry[] {
 	const entries: ScriptEntry[] = [];
 
 	for (const entry of source) {
-		const frame = Math.max(0, Math.round(Number(entry.frame)));
 		const normalized = parseInput(entry.input);
+		const frame = normalizeFrame(entry.frame, normalized);
 		if (Number.isFinite(frame) && validInputs.has(normalized)) {
 			entries.push({ frame, input: normalized });
 		}
 	}
 
-	entries.sort((a, b) => a.frame - b.frame);
+	entries.sort((a, b) => a.frame - b.frame || (a.input === 'U' ? -1 : 0) || (b.input === 'U' ? 1 : 0));
 
 	const compact: ScriptEntry[] = [];
 	for (const entry of entries) {
 		const last = compact.at(-1);
-		if (last && last.frame === entry.frame) {
+		if (last && last.frame === entry.frame && last.input !== 'U' && entry.input !== 'U') {
 			compact[compact.length - 1] = entry;
 		} else if (!last || last.input !== entry.input) {
 			compact.push(entry);
 		}
-	}
-
-	if (!compact.length || compact[0].frame !== 0) {
-		compact.unshift({ frame: 0, input: 'LR' });
-	} else if (compact[0].input === '.') {
-		compact[0] = { ...compact[0], input: 'LR' };
 	}
 
 	return compact;
@@ -95,17 +96,21 @@ export function mutateScript(base: ScriptEntry[], range: number, step: number): 
 	if (op < 0.62) {
 		const i = Math.floor(Math.random() * script.length);
 		const shift = (Math.floor(Math.random() * (range * 2 + 1)) - range) * step;
-		script[i] = { ...script[i], frame: Math.max(0, script[i].frame + shift) };
+		const input = script[i].input;
+		script[i] = { ...script[i], frame: input === 'U' ? Math.min(0, script[i].frame + shift) : Math.max(0, script[i].frame + shift) };
 	} else if (op < 0.82) {
 		const last = Math.max(60, script[script.length - 1].frame + 120);
 		script.push({
 			frame: Math.floor(Math.random() * last),
 			input: inputs[Math.floor(Math.random() * inputs.length)]
 		});
-	} else if (op < 0.92 && script.length > 1) {
-		script.splice(1 + Math.floor(Math.random() * (script.length - 1)), 1);
+	} else if (op < 0.92 && script.some((entry) => entry.input !== 'U')) {
+		const indices = script.map((entry, index) => (entry.input === 'U' ? -1 : index)).filter((index) => index >= 0);
+		script.splice(indices[Math.floor(Math.random() * indices.length)], 1);
 	} else {
-		const i = Math.floor(Math.random() * script.length);
+		const indices = script.map((entry, index) => (entry.input === 'U' ? -1 : index)).filter((index) => index >= 0);
+		const i = indices.length ? indices[Math.floor(Math.random() * indices.length)] : 0;
+		if (script[i].input === 'U') return normalizeScript(script);
 		script[i] = { ...script[i], input: inputs[Math.floor(Math.random() * inputs.length)] };
 	}
 

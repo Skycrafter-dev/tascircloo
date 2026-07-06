@@ -20,8 +20,10 @@
 	};
 
 	const INPUTS = ['.', 'L', 'R', 'LR'];
+	const SCRIPT_INPUTS = ['.', 'L', 'R', 'LR', 'U'];
 	const LEFT_CODES = new Set([37, 65]);
 	const RIGHT_CODES = new Set([39, 68]);
+	const UNFREEZE_CODES = new Set([85]);
 	const RUN_LOG_LIMIT = 20000;
 
 	const state = {
@@ -39,6 +41,13 @@
 		playIndex: 0,
 		playLastFrame: -1,
 		playLevel: null,
+		scriptUnfreezeConsumed: false,
+		physicsFrozen: true,
+		unfreezeStarted: false,
+		prestartRemaining: 0,
+		prestartElapsed: 0,
+		unfreezeSource: 'none',
+		freezeLevel: null,
 		virtual: { L: false, R: false },
 		prevVirtual: { L: false, R: false },
 		domHeld: { L: false, R: false },
@@ -69,6 +78,8 @@
 	};
 
 	W.__circlooTasBridge = state;
+
+	W.__circlooTasShouldStepPhysics = () => shouldStepPhysics();
 
 	function post(type, payload = {}) {
 		if (W.parent && W.parent !== W) {
@@ -124,6 +135,18 @@
 		};
 	}
 
+	function parseScriptInput(value) {
+		const text = String(value || '.').toUpperCase();
+		if (text.includes('U')) return 'U';
+		return inputOfHeld(parseInput(text));
+	}
+
+	function normalizeFrame(frame, input) {
+		const n = Math.round(Number(frame));
+		if (!Number.isFinite(n)) return Number.NaN;
+		return input === 'U' ? Math.min(0, n) : Math.max(0, n);
+	}
+
 	function parseScriptText(text) {
 		return String(text || '')
 			.split(/\r?\n/)
@@ -141,30 +164,21 @@
 		const out = [];
 
 		for (const entry of source) {
-			const frame = Math.max(0, Math.round(Number(entry.frame)));
-			const parsed = parseInput(entry.input);
-			const normalized = inputOfHeld(parsed);
-			if (Number.isFinite(frame) && INPUTS.includes(normalized)) {
+			const normalized = parseScriptInput(entry.input);
+			const frame = normalizeFrame(entry.frame, normalized);
+			if (Number.isFinite(frame) && SCRIPT_INPUTS.includes(normalized)) {
 				out.push({ frame, input: normalized });
 			}
 		}
 
-		out.sort((a, b) => a.frame - b.frame);
+		out.sort((a, b) => a.frame - b.frame || (a.input === 'U' ? -1 : 0) || (b.input === 'U' ? 1 : 0));
 
 		const compact = [];
 		for (const entry of out) {
-			if (compact.length && compact[compact.length - 1].frame === entry.frame) {
+			if (compact.length && compact[compact.length - 1].frame === entry.frame && compact[compact.length - 1].input !== 'U' && entry.input !== 'U') {
 				compact[compact.length - 1] = entry;
 			} else if (!compact.length || compact[compact.length - 1].input !== entry.input) {
 				compact.push(entry);
-			}
-		}
-
-		if (!options.exact) {
-			if (!compact.length || compact[0].frame !== 0) {
-				compact.unshift({ frame: 0, input: 'LR' });
-			} else if (compact[0].input === '.') {
-				compact[0] = { ...compact[0], input: 'LR' };
 			}
 		}
 
@@ -180,19 +194,16 @@
 	function compactCapturedScript(script) {
 		const out = [];
 		for (const entry of Array.isArray(script) ? script : []) {
-			const frame = Math.max(0, Math.round(Number(entry.frame)));
-			const input = inputOfHeld(parseInput(entry.input));
-			if (!Number.isFinite(frame) || !INPUTS.includes(input)) continue;
-			if (out.length && out[out.length - 1].frame === frame) {
+			const input = parseScriptInput(entry.input);
+			const frame = normalizeFrame(entry.frame, input);
+			if (!Number.isFinite(frame) || !SCRIPT_INPUTS.includes(input)) continue;
+			if (out.length && out[out.length - 1].frame === frame && out[out.length - 1].input !== 'U' && input !== 'U') {
 				out[out.length - 1] = { frame, input };
 			} else if (!out.length || out[out.length - 1].input !== input) {
 				out.push({ frame, input });
 			}
 		}
 		if (!out.length) return [];
-		if (out[0].frame !== 0) {
-			out.unshift({ frame: 0, input: '.' });
-		}
 		return out;
 	}
 
@@ -320,6 +331,76 @@
 				typeof W._t4 === 'function' ||
 				typeof W._R4 === 'function')
 		);
+	}
+
+	function resetFreeze(level = gmLevel()) {
+		state.physicsFrozen = true;
+		state.unfreezeStarted = false;
+		state.prestartRemaining = 0;
+		state.prestartElapsed = 0;
+		state.unfreezeSource = 'none';
+		state.freezeLevel = level;
+		state.scriptUnfreezeConsumed = false;
+		setVirtualInput('.');
+	}
+
+	function unfreezeEntry() {
+		return state.script.find((entry) => entry.input === 'U') || null;
+	}
+
+	function beginUnfreeze(frames = 0, source = 'manual') {
+		if (state.unfreezeStarted) return;
+		state.unfreezeStarted = true;
+		state.physicsFrozen = false;
+		state.prestartRemaining = Math.max(0, Math.floor(Number(frames) || 0));
+		state.prestartElapsed = 0;
+		state.unfreezeSource = source;
+	}
+
+	function requestManualUnfreeze() {
+		if (!hasPlayer()) return false;
+		if (state.prestartRemaining > 0) return false;
+		beginUnfreeze(0, 'manual');
+		return true;
+	}
+
+	function maybeConsumeScriptUnfreeze() {
+		if (!state.playbackMode || state.paused || state.scriptUnfreezeConsumed) return;
+		const entry = unfreezeEntry();
+		if (!entry) return;
+		state.scriptUnfreezeConsumed = true;
+		beginUnfreeze(Math.abs(Math.floor(Number(entry.frame) || 0)), 'script');
+		while (state.playIndex < state.script.length && state.script[state.playIndex].input === 'U') {
+			state.playIndex++;
+		}
+	}
+
+	function prestartReady() {
+		return hasPlayer() && state.unfreezeStarted && state.prestartRemaining <= 0;
+	}
+
+	function inputLocked() {
+		return hasPlayer() && !prestartReady();
+	}
+
+	function syncFreezeLevel() {
+		const level = gmLevel();
+		if (state.freezeLevel !== null && level !== state.freezeLevel) resetFreeze(level);
+		else if (state.freezeLevel === null) state.freezeLevel = level;
+	}
+
+	function shouldStepPhysics() {
+		if (!hasPlayer()) return true;
+		syncFreezeLevel();
+		maybeConsumeScriptUnfreeze();
+		if (!state.unfreezeStarted) {
+			state.physicsFrozen = true;
+			return false;
+		}
+		state.physicsFrozen = false;
+		if (gameFrame() === 0) state.prestartElapsed++;
+		if (state.prestartRemaining > 0) state.prestartRemaining--;
+		return true;
 	}
 
 	function simRoomId() {
@@ -696,6 +777,13 @@
 				playLastFrame: state.playLastFrame,
 				playLevel: state.playLevel
 			},
+			freeze: {
+				physicsFrozen: state.physicsFrozen,
+				unfreezeStarted: state.unfreezeStarted,
+				prestartRemaining: state.prestartRemaining,
+				prestartElapsed: state.prestartElapsed,
+				unfreezeSource: state.unfreezeSource
+			},
 			player: player ? primitiveFields(player, 180) : null,
 			big: big ? primitiveFields(big, 120) : null,
 			runtime: runtimeSnapshot(),
@@ -719,9 +807,9 @@
 		state.collectedCP = radiusCP();
 		state.lastCP = currentCP();
 		state.cpTimes = state.cpTimes.slice(0, state.lastCP + 1);
+		resetFreeze(gmLevel());
 		if (state.playbackMode) {
 			resetPlayback(gmLevel());
-			applyPlaybackForFrame(0);
 		}
 	}
 
@@ -739,7 +827,10 @@
 		state.runLogLastLevel = level;
 		state.runLogLastFrame = frame;
 
-		const key = `${level}:${frame}`;
+		const key =
+			frame === 0 && state.unfreezeStarted
+				? `${level}:${frame}:prestart:${state.prestartElapsed}`
+				: `${level}:${frame}`;
 		if (reason === 'tick' && key === state.runLogLastKey && state.runLog.length) {
 			const last = state.runLog[state.runLog.length - 1];
 			last.monitorTicks = (last.monitorTicks || 1) + 1;
@@ -781,7 +872,7 @@
 				script: state.script.slice()
 			},
 			capture: {
-				script: compactCapturedScript(state.capture),
+				script: recoveredCaptureScript(),
 				debug: state.captureDebug.slice()
 			},
 			currentTelemetry: telemetry(),
@@ -804,6 +895,7 @@
 		state.playIndex = 0;
 		state.playLastFrame = -1;
 		state.playLevel = level;
+		state.scriptUnfreezeConsumed = false;
 		state.prevVirtual = { L: false, R: false };
 		state.virtual = { L: false, R: false };
 	}
@@ -814,10 +906,19 @@
 		const level = gmLevel();
 		if (state.playLevel == null || level !== state.playLevel) resetPlayback(level);
 		if (!Number.isFinite(frame)) return;
+		maybeConsumeScriptUnfreeze();
+		if (!prestartReady()) {
+			setVirtualInput('.');
+			return;
+		}
 		if (state.playLastFrame >= 0 && frame < state.playLastFrame - 1) resetPlayback(level);
 
 		state.playLastFrame = frame;
 		while (state.playIndex < state.script.length && state.script[state.playIndex].frame <= frame) {
+			if (state.script[state.playIndex].input === 'U') {
+				state.playIndex++;
+				continue;
+			}
 			setVirtualInput(state.script[state.playIndex].input);
 			state.playIndex++;
 		}
@@ -863,9 +964,16 @@
 	}
 
 	function shouldCaptureInput(self, code) {
-		if (state.playbackMode || state.paused || !isVirtualCode(code)) return false;
+		if (state.playbackMode || state.paused || !isVirtualCode(code) || inputLocked()) return false;
 		const player = gmPlayer();
 		return sameGameInstance(self, player) || sameGameInstance(this, player);
+	}
+
+	function gatedNativeInput(self, code, value) {
+		if (!isVirtualCode(code) || !inputLocked()) return value;
+		const player = gmPlayer();
+		if (sameGameInstance(self, player) || sameGameInstance(this, player)) return 0;
+		return value;
 	}
 
 	function inputCheckGroupDone(code, value) {
@@ -947,6 +1055,7 @@
 	}
 
 	function nativeInputHeld(code) {
+		if (inputLocked() && isVirtualCode(code)) return false;
 		const check = state.originalInputCheck || (typeof W._J3 === 'function' ? W._J3 : null);
 		if (typeof check !== 'function') return false;
 
@@ -978,9 +1087,10 @@
 			state.originalInputCheck = W[inputCheckName];
 			W[inputCheckName] = function patchedInputCheck(self, other, code) {
 				const nativeValue = state.originalInputCheck.apply(this, arguments);
-				captureInputCheck.call(this, self, code, nativeValue);
-				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
-				return overlayInput(nativeValue, virtualCheck(code));
+				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
+				captureInputCheck.call(this, self, code, gatedNativeValue);
+				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
+				return overlayInput(gatedNativeValue, virtualCheck(code));
 			};
 		}
 
@@ -988,8 +1098,9 @@
 			state.originalInputPressed = W[inputPressedName];
 			W[inputPressedName] = function patchedInputPressed(self, other, code) {
 				const nativeValue = state.originalInputPressed.apply(this, arguments);
-				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
-				return overlayInput(nativeValue, virtualPressed(code));
+				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
+				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
+				return overlayInput(gatedNativeValue, virtualPressed(code));
 			};
 		}
 
@@ -997,9 +1108,10 @@
 			state.originalPokiInputCheck = W._R4;
 			W._R4 = function patchedPokiInputCheck(self, other, code) {
 				const nativeValue = state.originalPokiInputCheck.apply(this, arguments);
-				captureInputCheck.call(this, self, code, nativeValue);
-				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
-				return overlayInput(nativeValue, virtualCheck(code));
+				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
+				captureInputCheck.call(this, self, code, gatedNativeValue);
+				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
+				return overlayInput(gatedNativeValue, virtualCheck(code));
 			};
 		}
 
@@ -1007,8 +1119,9 @@
 			state.originalPokiInputPressed = W._S4;
 			W._S4 = function patchedPokiInputPressed(self, other, code) {
 				const nativeValue = state.originalPokiInputPressed.apply(this, arguments);
-				if (!shouldUseVirtualInput.call(this, self, code)) return nativeValue;
-				return overlayInput(nativeValue, virtualPressed(code));
+				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
+				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
+				return overlayInput(gatedNativeValue, virtualPressed(code));
 			};
 		}
 
@@ -1080,6 +1193,14 @@
 		state.cpTimes = [];
 	}
 
+	function recoveredCaptureScript() {
+		const script = compactCapturedScript(state.capture);
+		if (state.unfreezeStarted) {
+			script.unshift({ frame: -Math.max(0, state.prestartElapsed), input: 'U' });
+		}
+		return compactCapturedScript(script);
+	}
+
 	function currentRunScript() {
 		if (state.playbackMode) {
 			const frame = captureFrame();
@@ -1087,7 +1208,7 @@
 			return script.length ? script : [{ frame: 0, input: inputOfHeld(state.virtual) }];
 		}
 
-		return compactCapturedScript(state.capture);
+		return recoveredCaptureScript();
 	}
 
 	function updateCheckpointTracking() {
@@ -1132,7 +1253,14 @@
 			captured: state.capture.length,
 			playbackMode: state.playbackMode,
 			paused: state.paused,
-			sim: IS_SIM
+			sim: IS_SIM,
+			freeze: {
+				physicsFrozen: state.physicsFrozen,
+				unfreezeStarted: state.unfreezeStarted,
+				prestartRemaining: state.prestartRemaining,
+				prestartElapsed: state.prestartElapsed,
+				unfreezeSource: state.unfreezeSource
+			}
 		};
 	}
 
@@ -1334,8 +1462,6 @@
 			state.lastCP = 0;
 			tryStartLevel(options.level);
 			W.__circlooTasPumpMany(Math.max(0, Number(options.warmup) || 0));
-			resetPlayback(gmLevel());
-			setVirtualInput('.');
 			state.collectedCP = 0;
 			state.lastCP = 0;
 			state.cpTimes = [];
@@ -1439,12 +1565,20 @@
 
 		function keyDown(event) {
 			if (shouldIgnoreKeyEvent(event)) return;
+			if (UNFREEZE_CODES.has(event.keyCode)) {
+				if (requestManualUnfreeze()) {
+					event.preventDefault?.();
+					event.stopPropagation?.();
+				}
+				return;
+			}
 			if (LEFT_CODES.has(event.keyCode)) state.domHeld.L = true;
 			if (RIGHT_CODES.has(event.keyCode)) state.domHeld.R = true;
 		}
 
 		function keyUp(event) {
 			if (shouldIgnoreKeyEvent(event)) return;
+			if (UNFREEZE_CODES.has(event.keyCode)) return;
 			if (LEFT_CODES.has(event.keyCode)) state.domHeld.L = false;
 			if (RIGHT_CODES.has(event.keyCode)) state.domHeld.R = false;
 		}

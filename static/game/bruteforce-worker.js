@@ -379,26 +379,56 @@
 		return compact;
 	}
 
-	function mutateScript(base, range, step) {
+	function finiteFrame(value, fallback) {
+		const n = Math.floor(Number(value));
+		return Number.isFinite(n) ? n : fallback;
+	}
+
+	function mutationBounds(settings) {
+		const min = Math.max(0, finiteFrame(settings && settings.minFrame, 0));
+		const maxFrames = Math.max(0, finiteFrame(settings && settings.maxFrames, 0));
+		const configuredMax = Math.max(0, finiteFrame(settings && settings.maxFrame, 0));
+		const max = configuredMax > 0 ? configuredMax : maxFrames;
+		return { min, max: Math.max(min, max) };
+	}
+
+	function mutableIndices(script, bounds) {
+		return script
+			.map((entry, index) => (entry.input !== 'U' && entry.frame >= bounds.min && entry.frame <= bounds.max ? index : -1))
+			.filter((index) => index >= 0);
+	}
+
+	function clampMutationFrame(frame, bounds) {
+		return Math.max(bounds.min, Math.min(bounds.max, Math.round(Number(frame)) || bounds.min));
+	}
+
+	function randomFrame(bounds) {
+		return bounds.min + Math.floor(Math.random() * (bounds.max - bounds.min + 1));
+	}
+
+	function addMutableInput(script, bounds, inputs) {
+		script.push({ frame: randomFrame(bounds), input: inputs[Math.floor(Math.random() * inputs.length)] });
+	}
+
+	function mutateScript(base, range, step, settings) {
 		const script = normalizeScript(base);
 		const inputs = ['.', 'L', 'R', 'LR'];
+		const bounds = mutationBounds(settings);
+		const indices = mutableIndices(script, bounds);
 		const op = Math.random();
-		if (op < 0.62) {
-			const i = Math.floor(Math.random() * script.length);
+		if (op < 0.62 && indices.length) {
+			const i = indices[Math.floor(Math.random() * indices.length)];
 			const shift = (Math.floor(Math.random() * (range * 2 + 1)) - range) * step;
-			const input = script[i].input;
-			script[i] = { ...script[i], frame: input === 'U' ? Math.min(0, script[i].frame + shift) : Math.max(0, script[i].frame + shift) };
+			script[i] = { ...script[i], frame: clampMutationFrame(script[i].frame + shift, bounds) };
 		} else if (op < 0.82) {
-			const last = Math.max(60, script[script.length - 1].frame + 120);
-			script.push({ frame: Math.floor(Math.random() * last), input: inputs[Math.floor(Math.random() * inputs.length)] });
-		} else if (op < 0.92 && script.some((entry) => entry.input !== 'U')) {
-			const indices = script.map((entry, index) => (entry.input === 'U' ? -1 : index)).filter((index) => index >= 0);
+			addMutableInput(script, bounds, inputs);
+		} else if (op < 0.92 && indices.length) {
 			script.splice(indices[Math.floor(Math.random() * indices.length)], 1);
-		} else {
-			const indices = script.map((entry, index) => (entry.input === 'U' ? -1 : index)).filter((index) => index >= 0);
-			const i = indices.length ? indices[Math.floor(Math.random() * indices.length)] : 0;
-			if (script[i].input === 'U') return normalizeScript(script);
+		} else if (indices.length) {
+			const i = indices[Math.floor(Math.random() * indices.length)];
 			script[i] = { ...script[i], input: inputs[Math.floor(Math.random() * inputs.length)] };
+		} else {
+			addMutableInput(script, bounds, inputs);
 		}
 		return normalizeScript(script);
 	}
@@ -441,10 +471,10 @@
 	function runOne() {
 		if (!running || !current) return;
 		try {
-			const candidate = mutateScript(current.best, Math.max(0, current.settings.mutRange), Math.max(1, current.settings.mutStep));
+			const candidate = mutateScript(current.best, Math.max(0, current.settings.mutRange), Math.max(1, current.settings.mutStep), current.settings);
 			const result = trial(candidate);
 			current.trials += 1;
-			if (result.score < current.bestScore) {
+			if (result.reached && result.score < current.bestScore) {
 				current.best = normalizeScript(candidate);
 				current.bestScore = result.score;
 				current.bestReached = result.reached;
@@ -480,9 +510,11 @@
 			running = true;
 			const result = trial(base);
 			current.trials = 1;
-			current.bestScore = result.score;
-			current.bestReached = result.reached;
-			current.bestTimes = result.times || [];
+			if (result.reached) {
+				current.bestScore = result.score;
+				current.bestReached = true;
+				current.bestTimes = result.times || [];
+			}
 			postProgress(result);
 			realSetTimeout(runOne, 0);
 		} catch (error) {
@@ -503,11 +535,12 @@
 	});
 
 	installEnvironment();
-	importScripts('/game/tas-bridge.js?v=17');
+	importScripts('/game/tas-bridge.js?v=50');
 	importScripts('/game/html5game_a5/tph_html5fixes3.js?v=1');
 	importScripts('/game/html5game_a5/uph_quickTextRender.js?v=1');
 	importScripts('/game/html5game_a5/vph_HTML5Link.js?v=1');
 	W.drawCanvasTextFast = noop;
 	importScripts('/game/html5game_a5/circloo.js?v=6');
 	if (typeof W.GameMaker_Init === 'function') W.GameMaker_Init();
+	if (typeof W.__circlooTasPatchGameHooks === 'function') W.__circlooTasPatchGameHooks();
 })();

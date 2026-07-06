@@ -377,6 +377,7 @@
 
 	function requestManualUnfreeze() {
 		if (!freezeApplies()) return false;
+		if (!hasPlayer()) return false;
 		if (state.prestartRemaining > 0) return false;
 		beginUnfreeze(0, 'manual');
 		return true;
@@ -384,6 +385,7 @@
 
 	function maybeConsumeScriptUnfreeze() {
 		if (!state.playbackMode || state.paused || state.scriptUnfreezeConsumed) return;
+		if (!hasPlayer()) return;
 		const entry = unfreezeEntry();
 		if (!entry) return;
 		state.scriptUnfreezeConsumed = true;
@@ -394,7 +396,7 @@
 	}
 
 	function prestartReady() {
-		return freezeApplies() && state.unfreezeStarted && state.prestartRemaining <= 0;
+		return freezeApplies() && hasPlayer() && state.unfreezeStarted && state.prestartRemaining <= 0;
 	}
 
 	function inputLocked() {
@@ -440,6 +442,7 @@
 	function shouldStepPhysics() {
 		if (!freezeApplies()) return true;
 		syncFreezeLifecycle();
+		if (!hasPlayer()) return IS_SIM;
 		maybeConsumeScriptUnfreeze();
 		if (!state.unfreezeStarted) {
 			state.physicsFrozen = true;
@@ -453,6 +456,7 @@
 
 	function shouldFreezeRoomUpdate() {
 		if (!freezeApplies()) return false;
+		if (!hasPlayer()) return false;
 		syncFreezeLifecycle();
 		return !state.unfreezeStarted;
 	}
@@ -1299,6 +1303,7 @@
 				'var shouldFreeze = function() {',
 				'  return !!(typeof window !== "undefined" && window.__circlooTasShouldFreezeRoomUpdate && window.__circlooTasShouldFreezeRoomUpdate());',
 				'};',
+				`var skipDraw = ${IS_SIM ? 'true' : 'false'};`,
 				'var stepEvents = {};',
 				'try { stepEvents[_no2] = true; } catch (error) {}',
 				'try { stepEvents[_po2] = true; } catch (error) {}',
@@ -1314,6 +1319,7 @@
 				'if (typeof manager._Hy === "function") {',
 				'  var originalHy = manager._Hy;',
 				'  manager._Hy = function(event) {',
+				'    try { if (skipDraw && event === _Rt2) return true; } catch (error) {}',
 				'    if (shouldFreeze() && stepEvents[event]) return true;',
 				'    return originalHy.apply(this, arguments);',
 				'  };',
@@ -1322,6 +1328,14 @@
 				'  _Q71.__circlooTasFreezePatched = true;',
 				'  var originalTimelineStep = _Q71._m81;',
 				'  _Q71._m81 = function() { if (shouldFreeze()) return; return originalTimelineStep.apply(this, arguments); };',
+				'}',
+				'if (skipDraw && typeof _GM2 !== "undefined" && _GM2 && _GM2.prototype && typeof _GM2.prototype._Hy === "function" && !_GM2.__circlooTasDrawPatched) {',
+				'  _GM2.__circlooTasDrawPatched = true;',
+				'  var originalObjectEvent = _GM2.prototype._Hy;',
+				'  _GM2.prototype._Hy = function(event) {',
+				'    try { if (event === _Rt2) return true; } catch (error) {}',
+				'    return originalObjectEvent.apply(this, arguments);',
+				'  };',
 				'}',
 				'return true;'
 			].join('\n')
@@ -1632,18 +1646,30 @@
 		};
 	}
 
+	function prepareSimTrialLevel(level) {
+		tryStartLevel(level);
+		resetFreeze(gmLevel());
+		for (let i = 0; i < 180; i++) {
+			if (hasPlayer() && radiusCP() === 0) break;
+			W.__circlooTasPumpFrame();
+		}
+		tryStartLevel(level);
+		resetFreeze(gmLevel());
+		return hasPlayer() && radiusCP() === 0;
+	}
+
 	function simTrial(script, options) {
 		state.exactCheckpointMode = true;
 		try {
+			state.cpTimes = [];
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			prepareSimTrialLevel(options.level);
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			state.cpTimes = [];
 			armReplay(script);
-			state.cpTimes = [];
-			state.collectedCP = 0;
-			state.lastCP = 0;
-			tryStartLevel(options.level);
-			W.__circlooTasPumpMany(Math.max(0, Number(options.warmup) || 0));
-			state.collectedCP = 0;
-			state.lastCP = 0;
-			state.cpTimes = [];
+			resetFreeze(gmLevel());
 
 			const targetCP = Math.max(1, Math.floor(Number(options.targetCP) || 1));
 			const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
@@ -1673,6 +1699,7 @@
 	}
 
 	W.__circlooTasRunTrial = simTrial;
+	W.__circlooTasPatchGameHooks = patchGameHooks;
 
 	function monitorTick() {
 		state.wallFrame++;
@@ -1848,6 +1875,7 @@
 
 		const wait = () => {
 			if (!gameReady()) return REAL.setTimeout(wait, 50);
+			patchGameHooks();
 			if (IS_SIM && !ensureSimPlayRoom()) {
 				if (typeof W.__circlooTasPumpFrame === 'function') W.__circlooTasPumpFrame();
 				return REAL.setTimeout(wait, 0);

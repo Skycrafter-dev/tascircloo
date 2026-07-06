@@ -22,6 +22,19 @@
 	const defaultText = '';
 	const scriptKey = 'circloo-tas:script';
 	const settingsKey = 'circloo-tas:bruteforce-settings';
+	const defaultBruteforceSettings = {
+		level: 1,
+		target: 'cp',
+		targetCP: 1,
+		finishCP: 7,
+		maxFrames: 3600,
+		minFrame: 0,
+		maxFrame: 0,
+		mutRange: 8,
+		mutStep: 1,
+		warmup: 0,
+		autoUseBest: false
+	} satisfies BruteforceSettings;
 
 	let iframeEl = $state<HTMLIFrameElement | null>(null);
 	let gameShellEl = $state<HTMLDivElement | null>(null);
@@ -46,17 +59,7 @@
 		paused: false,
 		sim: false
 	});
-	let settings = $state<BruteforceSettings>({
-		level: 1,
-		target: 'cp',
-		targetCP: 1,
-		finishCP: 7,
-		maxFrames: 3600,
-		mutRange: 8,
-		mutStep: 1,
-		warmup: 3,
-		autoUseBest: false
-	});
+	let settings = $state<BruteforceSettings>({ ...defaultBruteforceSettings });
 	let bruteforce = $state({
 		running: false,
 		best: [] as ScriptEntry[],
@@ -197,6 +200,12 @@
 
 	function saveSettings() {
 		localStorage.setItem(settingsKey, JSON.stringify(settings));
+	}
+
+	function resetBruteforceSettings() {
+		settings = { ...defaultBruteforceSettings };
+		saveSettings();
+		showToast('Bruteforce defaults reset');
 	}
 
 	function bruteforceLevel() {
@@ -502,6 +511,24 @@
 					</label>
 					<label>
 						<span class="setting-label">
+							Min Frame
+							<span class="info-dot" aria-label="Lowest frame the bruteforce may modify." data-tip="Lowest script frame the bruteforce may add, move, delete, or change. Earlier inputs stay fixed.">
+								<Info size={13} />
+							</span>
+						</span>
+						<input type="number" min="0" bind:value={settings.minFrame} onchange={saveSettings} />
+					</label>
+					<label>
+						<span class="setting-label">
+							Max Frame
+							<span class="info-dot" aria-label="Highest frame the bruteforce may modify." data-tip="Highest script frame the bruteforce may add, move, delete, or change. Set 0 to use Max frames.">
+								<Info size={13} />
+							</span>
+						</span>
+						<input type="number" min="0" bind:value={settings.maxFrame} onchange={saveSettings} />
+					</label>
+					<label>
+						<span class="setting-label">
 							Mutation
 							<span class="info-dot" aria-label="Largest frame offset used when mutating script input changes." data-tip="Largest frame offset used when mutating script input changes.">
 								<Info size={13} />
@@ -521,7 +548,7 @@
 					<label>
 						<span class="setting-label">
 							Warmup
-							<span class="info-dot" aria-label="Frames to simulate after starting a level before scoring begins." data-tip="Frames to simulate after starting a level before scoring begins.">
+							<span class="info-dot" aria-label="Legacy setting kept for old saved settings." data-tip="Legacy setting kept for old saved settings. Scripted U inputs now control pre-start physics timing.">
 								<Info size={13} />
 							</span>
 						</span>
@@ -546,6 +573,7 @@
 				</div>
 				<div class="button-row">
 					<button onclick={useBest}>Use Best</button>
+					<button onclick={resetBruteforceSettings}><RefreshCcw size={16} />Reset defaults</button>
 				</div>
 				{#if bruteforce.lastError}
 					<p class="error">{bruteforce.lastError}</p>

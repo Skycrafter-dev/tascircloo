@@ -86,32 +86,68 @@ export function gameTime(frame: number | null | undefined): string {
 	return `${minutes}:${seconds}.${centiseconds}`;
 }
 
-export function mutateScript(base: ScriptEntry[], range: number, step: number): ScriptEntry[] {
+export type MutationFrameBounds = {
+	minFrame?: number;
+	maxFrame?: number;
+	maxFrames?: number;
+};
+
+function finiteFrame(value: unknown, fallback: number): number {
+	const n = Math.floor(Number(value));
+	return Number.isFinite(n) ? n : fallback;
+}
+
+function mutationBounds(script: ScriptEntry[], bounds: MutationFrameBounds): { min: number; max: number } {
+	const min = Math.max(0, finiteFrame(bounds.minFrame, 0));
+	const fallbackMax = Math.max(60, (script.at(-1)?.frame ?? 0) + 120);
+	const maxFrames = Math.max(0, finiteFrame(bounds.maxFrames, fallbackMax));
+	const configuredMax = Math.max(0, finiteFrame(bounds.maxFrame, 0));
+	const max = configuredMax > 0 ? configuredMax : maxFrames;
+	return { min, max: Math.max(min, max) };
+}
+
+function mutableIndices(script: ScriptEntry[], bounds: { min: number; max: number }): number[] {
+	return script
+		.map((entry, index) => (entry.input !== 'U' && entry.frame >= bounds.min && entry.frame <= bounds.max ? index : -1))
+		.filter((index) => index >= 0);
+}
+
+function clampMutationFrame(frame: number, bounds: { min: number; max: number }): number {
+	return Math.max(bounds.min, Math.min(bounds.max, Math.round(frame)));
+}
+
+function randomFrame(bounds: { min: number; max: number }): number {
+	return bounds.min + Math.floor(Math.random() * (bounds.max - bounds.min + 1));
+}
+
+function addMutableInput(script: ScriptEntry[], bounds: { min: number; max: number }, inputs: TasInput[]) {
+	script.push({
+		frame: randomFrame(bounds),
+		input: inputs[Math.floor(Math.random() * inputs.length)]
+	});
+}
+
+export function mutateScript(base: ScriptEntry[], range: number, step: number, frameBounds: MutationFrameBounds = {}): ScriptEntry[] {
 	const script = normalizeScript(base);
-	if (!script.length) return script;
 
 	const inputs: TasInput[] = ['.', 'L', 'R', 'LR'];
+	const bounds = mutationBounds(script, frameBounds);
+	const indices = mutableIndices(script, bounds);
 	const op = Math.random();
 
-	if (op < 0.62) {
-		const i = Math.floor(Math.random() * script.length);
+	if (op < 0.62 && indices.length) {
+		const i = indices[Math.floor(Math.random() * indices.length)];
 		const shift = (Math.floor(Math.random() * (range * 2 + 1)) - range) * step;
-		const input = script[i].input;
-		script[i] = { ...script[i], frame: input === 'U' ? Math.min(0, script[i].frame + shift) : Math.max(0, script[i].frame + shift) };
+		script[i] = { ...script[i], frame: clampMutationFrame(script[i].frame + shift, bounds) };
 	} else if (op < 0.82) {
-		const last = Math.max(60, script[script.length - 1].frame + 120);
-		script.push({
-			frame: Math.floor(Math.random() * last),
-			input: inputs[Math.floor(Math.random() * inputs.length)]
-		});
-	} else if (op < 0.92 && script.some((entry) => entry.input !== 'U')) {
-		const indices = script.map((entry, index) => (entry.input === 'U' ? -1 : index)).filter((index) => index >= 0);
+		addMutableInput(script, bounds, inputs);
+	} else if (op < 0.92 && indices.length) {
 		script.splice(indices[Math.floor(Math.random() * indices.length)], 1);
-	} else {
-		const indices = script.map((entry, index) => (entry.input === 'U' ? -1 : index)).filter((index) => index >= 0);
-		const i = indices.length ? indices[Math.floor(Math.random() * indices.length)] : 0;
-		if (script[i].input === 'U') return normalizeScript(script);
+	} else if (indices.length) {
+		const i = indices[Math.floor(Math.random() * indices.length)];
 		script[i] = { ...script[i], input: inputs[Math.floor(Math.random() * inputs.length)] };
+	} else {
+		addMutableInput(script, bounds, inputs);
 	}
 
 	return normalizeScript(script);

@@ -72,6 +72,8 @@ export type BruteforceSettings = {
 	targetCP: number;
 	finishCP: number;
 	maxFrames: number;
+	minFrame: number;
+	maxFrame: number;
 	mutRange: number;
 	mutStep: number;
 	warmup: number;

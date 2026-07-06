@@ -37,7 +37,23 @@ export type BruteforceProgress = {
 	lastScore: number;
 	lastReached: boolean;
 	improvements: number;
+	debug?: BruteforceDebug;
 	error?: string;
+};
+
+export type BruteforceDebugStats = {
+	workerMs: number;
+	mutateMs: number;
+	trialMs: number;
+	prepareMs: number;
+	pumpMs: number;
+	frames: number;
+	prepPumps: number;
+};
+
+export type BruteforceDebug = {
+	last: BruteforceDebugStats;
+	avg: BruteforceDebugStats;
 };
 
 export type GameMessage =

@@ -12,9 +12,10 @@
 	} from '@lucide/svelte';
 	import {
 		appMessage,
+		type BruteforceDebug,
+		type BruteforceSettings,
 		type BruteforceWorkerMessage,
 		type GameMessage,
-		type BruteforceSettings,
 		type Telemetry
 	} from '$lib/tas/protocol';
 	import { gameTime, normalizeScript, serializeScript, type ScriptEntry } from '$lib/tas/script';
@@ -69,6 +70,7 @@
 		trials: 0,
 		improvements: 0,
 		startedAt: 0,
+		debug: null as BruteforceDebug | null,
 		lastError: ''
 	});
 
@@ -92,6 +94,12 @@
 	const bruteforceRate = $derived(
 		bruteforce.startedAt ? bruteforce.trials / Math.max(0.001, (performance.now() - bruteforce.startedAt) / 1000) : 0
 	);
+
+	function debugMs(value: number | null | undefined) {
+		const n = Number(value);
+		if (!Number.isFinite(n)) return '--';
+		return n >= 10 ? n.toFixed(1) : n.toFixed(2);
+	}
 
 	function postToGame(type: string, payload: Record<string, unknown> = {}) {
 		iframeEl?.contentWindow?.postMessage(appMessage(type, payload), window.location.origin);
@@ -251,6 +259,7 @@
 				bruteforce.lastScore = message.lastScore;
 				bruteforce.lastReached = message.lastReached;
 				bruteforce.improvements = message.improvements;
+				bruteforce.debug = message.debug ?? bruteforce.debug;
 				bruteforce.lastError = message.error ?? '';
 				if (hadImprovement) {
 					setStatus(`Improved to ${gameTime(message.bestScore)}`);
@@ -290,6 +299,7 @@
 		bruteforce.trials = 0;
 		bruteforce.improvements = 0;
 		bruteforce.startedAt = performance.now();
+		bruteforce.debug = null;
 		bruteforce.lastError = '';
 		setStatus('Starting bruteforce worker');
 
@@ -571,6 +581,18 @@
 					<span>best {gameTime(bruteforce.bestScore)}</span>
 					<span>{bruteforce.improvements} improvements</span>
 				</div>
+				{#if bruteforce.debug}
+					<div class="bruteforce-debug" aria-label="Bruteforce performance debug">
+						<span>last worker {debugMs(bruteforce.debug.last.workerMs)}ms</span>
+						<span>avg worker {debugMs(bruteforce.debug.avg.workerMs)}ms</span>
+						<span>trial {debugMs(bruteforce.debug.avg.trialMs)}ms</span>
+						<span>prep {debugMs(bruteforce.debug.avg.prepareMs)}ms</span>
+						<span>pump {debugMs(bruteforce.debug.avg.pumpMs)}ms</span>
+						<span>mutate {debugMs(bruteforce.debug.avg.mutateMs)}ms</span>
+						<span>frames {Math.round(bruteforce.debug.avg.frames)}</span>
+						<span>prep pumps {Math.round(bruteforce.debug.avg.prepPumps)}</span>
+					</div>
+				{/if}
 				<div class="button-row">
 					<button onclick={useBest}>Use Best</button>
 					<button onclick={resetBruteforceSettings}><RefreshCcw size={16} />Reset defaults</button>
@@ -649,13 +671,15 @@
 	}
 
 	.telemetry-band,
-	.bruteforce-stats {
+	.bruteforce-stats,
+	.bruteforce-debug {
 		display: flex;
 		flex-wrap: wrap;
 		gap: 8px;
 	}
 
-	.bruteforce-stats span {
+	.bruteforce-stats span,
+	.bruteforce-debug span {
 		min-height: 28px;
 		display: inline-flex;
 		align-items: center;
@@ -665,6 +689,17 @@
 		padding: 0 10px;
 		border-radius: 6px;
 		font-variant-numeric: tabular-nums;
+	}
+
+	.bruteforce-debug {
+		margin-top: 8px;
+		font-size: 0.78rem;
+	}
+
+	.bruteforce-debug span {
+		min-height: 24px;
+		color: #a9a395;
+		background: #12140f;
 	}
 
 	.main-grid {

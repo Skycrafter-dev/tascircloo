@@ -7,13 +7,16 @@
 	const IS_SIM = PARAMS.get('sim') === '1';
 	const SIM_TOKEN = PARAMS.get('token') || '';
 	const FPS = 60;
+	const realPerformanceNow =
+		W.performance && typeof W.performance.now === 'function' ? W.performance.now.bind(W.performance) : null;
+	const realDateNow = W.Date && typeof W.Date.now === 'function' ? W.Date.now.bind(W.Date) : () => Date.now();
 
 	const REAL = {
 		setTimeout: W.setTimeout.bind(W),
 		clearTimeout: W.clearTimeout.bind(W),
 		setInterval: W.setInterval.bind(W),
 		clearInterval: W.clearInterval.bind(W),
-		now: () => (W.performance && typeof W.performance.now === 'function' ? W.performance.now() : Date.now()),
+		now: () => (realPerformanceNow ? realPerformanceNow() : realDateNow()),
 		raf: W.requestAnimationFrame
 			? W.requestAnimationFrame.bind(W)
 			: (callback) => W.setTimeout(() => callback(Date.now()), 16)
@@ -1337,6 +1340,36 @@
 				'    return originalObjectEvent.apply(this, arguments);',
 				'  };',
 				'}',
+				'if (skipDraw && typeof _Gx !== "undefined" && _Gx && !_Gx.__circlooTasFastObjectsPatched) {',
+				'  _Gx.__circlooTasFastObjectsPatched = true;',
+				'  var skipStepIds = [1, 2, 4, 5, 6, 8];',
+				'  for (var skipIndex = 0; skipIndex < skipStepIds.length; skipIndex++) {',
+				'    var skippedObject = _Gx._qH(skipStepIds[skipIndex]);',
+				'    if (skippedObject && skippedObject._Ym2) skippedObject._Ym2[_po2] = false;',
+				'  }',
+				'  var collectObject = _Gx._qH(21);',
+				'  if (collectObject) {',
+				'    collectObject._l7 = function(self, other) {',
+				'      var player = typeof _id === "function" ? _id(20) : null;',
+				'      if (player) {',
+				'        var radius = (Number(self._ye || 0) > 0.5 ? 16.8 : 24) + Number(player._jd || 0);',
+				'        var dx = Number(self.x || 0) - Number(player.x || 0);',
+				'        var dy = Number(self.y || 0) - Number(player.y || 0);',
+				'        if (dx * dx + dy * dy < radius * radius && typeof _P6 === "function") _P6(self, other);',
+				'      }',
+				'      if (Number(self._tq || 0) < 1) self._tq = Number(self._tq || 0) + 0.1;',
+				'    };',
+				'  }',
+				'}',
+				'if (skipDraw && typeof _VQ2 === "function" && !_VQ2.__circlooTasInputPatched) {',
+				'  var disabledInputUpdate = function() {};',
+				'  disabledInputUpdate.__circlooTasInputPatched = true;',
+				'  _VQ2 = disabledInputUpdate;',
+				'}',
+				'if (skipDraw && typeof _yC2 !== "undefined" && _yC2 && _yC2.prototype && typeof _yC2.prototype._HA === "function" && !_yC2.__circlooTasRenderPatched) {',
+				'  _yC2.__circlooTasRenderPatched = true;',
+				'  _yC2.prototype._HA = function() { return true; };',
+				'}',
 				'return true;'
 			].join('\n')
 		);
@@ -1630,6 +1663,14 @@
 					post('ERROR', { message: String(error && error.message ? error.message : error) });
 				}
 			}
+			if (IS_SIM) {
+				if (!W.__circlooTasDirectStep) {
+					W.__circlooTasDirectStep = W.Function(
+						'try { if (typeof _O83 !== "undefined" && _O83 === 3 && typeof _d93 === "function") { _d93(); return true; } } catch (error) {} return false;'
+					);
+				}
+				if (W.__circlooTasDirectStep()) return;
+			}
 			const callbacks = [...rafs.values()];
 			rafs.clear();
 			for (const callback of callbacks) {
@@ -1647,24 +1688,38 @@
 	}
 
 	function prepareSimTrialLevel(level) {
+		const debug = {
+			prepPumps: 0,
+			startRadius: radiusCP(),
+			endRadius: null,
+			endFrame: null,
+			ready: false
+		};
 		tryStartLevel(level);
 		resetFreeze(gmLevel());
 		for (let i = 0; i < 180; i++) {
 			if (hasPlayer() && radiusCP() === 0) break;
 			W.__circlooTasPumpFrame();
+			debug.prepPumps++;
 		}
 		tryStartLevel(level);
 		resetFreeze(gmLevel());
-		return hasPlayer() && radiusCP() === 0;
+		debug.endRadius = radiusCP();
+		debug.endFrame = gameFrame();
+		debug.ready = hasPlayer() && radiusCP() === 0;
+		return debug;
 	}
 
 	function simTrial(script, options) {
 		state.exactCheckpointMode = true;
+		const trialStart = REAL.now();
 		try {
 			state.cpTimes = [];
 			state.collectedCP = 0;
 			state.lastCP = 0;
-			prepareSimTrialLevel(options.level);
+			const prepareStart = REAL.now();
+			const prepareDebug = prepareSimTrialLevel(options.level);
+			const prepareMs = REAL.now() - prepareStart;
 			state.collectedCP = 0;
 			state.lastCP = 0;
 			state.cpTimes = [];
@@ -1675,8 +1730,11 @@
 			const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
 			let score = Infinity;
 			let reached = false;
+			let frames = 0;
+			const pumpStart = REAL.now();
 			for (let i = 0; i < options.maxFrames; i++) {
 				W.__circlooTasPumpFrame();
+				frames++;
 				updateCheckpointTracking();
 
 				if (options.target === 'cp' && state.cpTimes[targetCP] != null && state.collectedCP >= targetCP) {
@@ -1690,8 +1748,25 @@
 					break;
 				}
 			}
+			const pumpMs = REAL.now() - pumpStart;
 
-			return { score, reached, cp: state.collectedCP, times: state.cpTimes.slice() };
+			return {
+				score,
+				reached,
+				cp: state.collectedCP,
+				times: state.cpTimes.slice(),
+				debug: {
+					trialMs: REAL.now() - trialStart,
+					prepareMs,
+					pumpMs,
+					frames,
+					prepPumps: prepareDebug.prepPumps,
+					startRadius: prepareDebug.startRadius,
+					endRadius: prepareDebug.endRadius,
+					endFrame: prepareDebug.endFrame,
+					ready: prepareDebug.ready
+				}
+			};
 		} finally {
 			stopReplay();
 			state.exactCheckpointMode = false;

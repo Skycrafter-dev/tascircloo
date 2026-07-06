@@ -5,6 +5,13 @@
 	W.window = W;
 	W.globalThis = W;
 	const realSetTimeout = W.setTimeout.bind(W);
+	const realPerformanceNow =
+		W.performance && typeof W.performance.now === 'function' ? W.performance.now.bind(W.performance) : null;
+	const realDateNow = W.Date && typeof W.Date.now === 'function' ? W.Date.now.bind(W.Date) : () => 0;
+
+	function realNow() {
+		return realPerformanceNow ? realPerformanceNow() : realDateNow();
+	}
 
 	let runtimeReady = false;
 	let pendingStart = null;
@@ -453,6 +460,35 @@
 		});
 	}
 
+	function emptyDebugStats() {
+		return {
+			workerMs: 0,
+			mutateMs: 0,
+			trialMs: 0,
+			prepareMs: 0,
+			pumpMs: 0,
+			frames: 0,
+			prepPumps: 0
+		};
+	}
+
+	function recordDebug(sample) {
+		if (!current.debugTotals) current.debugTotals = emptyDebugStats();
+		current.debugCount = (current.debugCount || 0) + 1;
+		for (const key of Object.keys(current.debugTotals)) current.debugTotals[key] += Number(sample[key]) || 0;
+		current.debugLast = sample;
+	}
+
+	function debugPayload() {
+		const count = Math.max(1, current.debugCount || 0);
+		const avg = emptyDebugStats();
+		for (const key of Object.keys(avg)) avg[key] = ((current.debugTotals && current.debugTotals[key]) || 0) / count;
+		return {
+			last: current.debugLast || emptyDebugStats(),
+			avg
+		};
+	}
+
 	function postProgress(lastResult) {
 		W.postMessage({
 			source: 'circloo-tas-worker',
@@ -464,15 +500,30 @@
 			bestScript: current.best,
 			lastScore: lastResult.score,
 			lastReached: lastResult.reached,
-			improvements: current.improvements
+			improvements: current.improvements,
+			debug: debugPayload()
 		});
 	}
 
 	function runOne() {
 		if (!running || !current) return;
 		try {
+			const workerStart = realNow();
+			const mutateStart = realNow();
 			const candidate = mutateScript(current.best, Math.max(0, current.settings.mutRange), Math.max(1, current.settings.mutStep), current.settings);
+			const mutateMs = realNow() - mutateStart;
+			const trialStart = realNow();
 			const result = trial(candidate);
+			const trialMs = realNow() - trialStart;
+			recordDebug({
+				workerMs: realNow() - workerStart,
+				mutateMs,
+				trialMs,
+				prepareMs: result.debug && result.debug.prepareMs,
+				pumpMs: result.debug && result.debug.pumpMs,
+				frames: result.debug && result.debug.frames,
+				prepPumps: result.debug && result.debug.prepPumps
+			});
 			current.trials += 1;
 			if (result.reached && result.score < current.bestScore) {
 				current.best = normalizeScript(candidate);
@@ -505,10 +556,25 @@
 				bestReached: false,
 				bestTimes: [],
 				trials: 0,
-				improvements: 0
+				improvements: 0,
+				debugLast: emptyDebugStats(),
+				debugTotals: emptyDebugStats(),
+				debugCount: 0
 			};
 			running = true;
+			const workerStart = realNow();
+			const trialStart = realNow();
 			const result = trial(base);
+			const trialMs = realNow() - trialStart;
+			recordDebug({
+				workerMs: realNow() - workerStart,
+				mutateMs: 0,
+				trialMs,
+				prepareMs: result.debug && result.debug.prepareMs,
+				pumpMs: result.debug && result.debug.pumpMs,
+				frames: result.debug && result.debug.frames,
+				prepPumps: result.debug && result.debug.prepPumps
+			});
 			current.trials = 1;
 			if (result.reached) {
 				current.bestScore = result.score;
@@ -535,7 +601,7 @@
 	});
 
 	installEnvironment();
-	importScripts('/game/tas-bridge.js?v=50');
+	importScripts('/game/tas-bridge.js?v=53');
 	importScripts('/game/html5game_a5/tph_html5fixes3.js?v=1');
 	importScripts('/game/html5game_a5/uph_quickTextRender.js?v=1');
 	importScripts('/game/html5game_a5/vph_HTML5Link.js?v=1');

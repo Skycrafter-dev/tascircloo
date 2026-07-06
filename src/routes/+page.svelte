@@ -236,12 +236,14 @@
 	}
 
 	function ensureBruteforceWorker() {
-		if (bruteforceWorker) return bruteforceWorker;
+		bruteforceWorker?.terminate();
 		bruteforceWorker = new Worker(`/game/bruteforce-worker.js?sim=1&v=${Date.now()}`);
 		bruteforceWorker.addEventListener('message', handleBruteforceMessage);
 		bruteforceWorker.addEventListener('error', (event) => {
 			bruteforce.running = false;
 			bruteforce.lastError = event.message;
+			bruteforceWorker?.terminate();
+			bruteforceWorker = null;
 			setError(event.message);
 		});
 		return bruteforceWorker;
@@ -319,6 +321,8 @@
 	function stopBruteforce() {
 		bruteforce.running = false;
 		bruteforceWorker?.postMessage(appMessage('STOP_BRUTEFORCE'));
+		bruteforceWorker?.terminate();
+		bruteforceWorker = null;
 	}
 
 	function useBest() {

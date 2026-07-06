@@ -12,6 +12,7 @@
 		}
 	})();
 	const realSetTimeout = W.setTimeout.bind(W);
+	const realClearTimeout = W.clearTimeout.bind(W);
 	const realPerformanceNow =
 		W.performance && typeof W.performance.now === 'function' ? W.performance.now.bind(W.performance) : null;
 	const realDateNow = W.Date && typeof W.Date.now === 'function' ? W.Date.now.bind(W.Date) : () => 0;
@@ -22,6 +23,7 @@
 
 	let runtimeReady = false;
 	let pendingStart = null;
+	let pendingTrial = null;
 	let running = false;
 	let current = null;
 
@@ -347,6 +349,11 @@
 						pendingStart = null;
 						startBruteforce(next);
 					}
+					if (pendingTrial) {
+						const next = pendingTrial;
+						pendingTrial = null;
+						runTrialRequest(next);
+					}
 				}
 				W.postMessage(message);
 			}
@@ -455,16 +462,81 @@
 		});
 	}
 
-	function trial(script) {
-		if (typeof W.__circlooTasRunTrial !== 'function') throw new Error('Worker game runtime is not ready');
-		return W.__circlooTasRunTrial(script, {
+	function trialOptions() {
+		return {
 			level: current.level,
 			target: current.settings.target,
 			targetCP: current.settings.targetCP,
 			finishCP: current.settings.finishCP,
 			maxFrames: current.settings.maxFrames,
 			warmup: current.settings.warmup
+		};
+	}
+
+	function runLocalTrial(script, options) {
+		if (typeof W.__circlooTasRunTrial !== 'function') throw new Error('Worker game runtime is not ready');
+		return W.__circlooTasRunTrial(script, options);
+	}
+
+	function isolatedTrial(script, options) {
+		return new Promise((resolve, reject) => {
+			const child = new Worker(`/game/bruteforce-worker.js?sim=1&single=1&v=${encodeURIComponent(`${workerCacheBust}-${Date.now()}-${Math.random()}`)}`);
+			let done = false;
+			const timeout = realSetTimeout(() => {
+				if (done) return;
+				done = true;
+				child.terminate();
+				reject(new Error('Trial worker timed out'));
+			}, 30000);
+
+			child.onmessage = (event) => {
+				const message = event.data || {};
+				if (message.source !== 'circloo-tas-worker') return;
+				if (message.type === 'BRUTEFORCE_READY') {
+					child.postMessage({ source: 'circloo-tas-app', type: 'RUN_TRIAL', script, options });
+					return;
+				}
+				if (message.type === 'TRIAL_RESULT') {
+					if (done) return;
+					done = true;
+					realClearTimeout(timeout);
+					child.terminate();
+					resolve(message.result);
+					return;
+				}
+				if (message.type === 'BRUTEFORCE_ERROR') {
+					if (done) return;
+					done = true;
+					realClearTimeout(timeout);
+					child.terminate();
+					reject(new Error(message.error || 'Trial worker error'));
+				}
+			};
+			child.onerror = (event) => {
+				if (done) return;
+				done = true;
+				realClearTimeout(timeout);
+				child.terminate();
+				reject(new Error(event && event.message ? event.message : 'Trial worker error'));
+			};
 		});
+	}
+
+	function trial(script) {
+		return isolatedTrial(script, trialOptions());
+	}
+
+	function runTrialRequest(message) {
+		if (!runtimeReady) {
+			pendingTrial = message;
+			return;
+		}
+		try {
+			const result = runLocalTrial(normalizeScript(message.script || []), message.options || {});
+			W.postMessage({ source: 'circloo-tas-worker', type: 'TRIAL_RESULT', result });
+		} catch (error) {
+			postError(error);
+		}
 	}
 
 	function emptyDebugStats() {
@@ -507,12 +579,14 @@
 			bestScript: current.best,
 			lastScore: lastResult.score,
 			lastReached: lastResult.reached,
+			lastScript: current.lastScript,
+			lastDebug: lastResult.debug,
 			improvements: current.improvements,
 			debug: debugPayload()
 		});
 	}
 
-	function runOne() {
+	async function runOne() {
 		if (!running || !current) return;
 		try {
 			const workerStart = realNow();
@@ -520,8 +594,10 @@
 			const candidate = mutateScript(current.best, Math.max(0, current.settings.mutRange), Math.max(1, current.settings.mutStep), current.settings);
 			const mutateMs = realNow() - mutateStart;
 			const trialStart = realNow();
-			const result = trial(candidate);
+			const result = await trial(candidate);
+			if (!running || !current) return;
 			const trialMs = realNow() - trialStart;
+			current.lastScript = normalizeScript(candidate);
 			recordDebug({
 				workerMs: realNow() - workerStart,
 				mutateMs,
@@ -547,7 +623,7 @@
 		}
 	}
 
-	function startBruteforce(message) {
+	async function startBruteforce(message) {
 		if (!runtimeReady) {
 			pendingStart = message;
 			return;
@@ -571,8 +647,10 @@
 			running = true;
 			const workerStart = realNow();
 			const trialStart = realNow();
-			const result = trial(base);
+			const result = await trial(base);
+			if (!running || !current) return;
 			const trialMs = realNow() - trialStart;
+			current.lastScript = base;
 			recordDebug({
 				workerMs: realNow() - workerStart,
 				mutateMs: 0,
@@ -600,9 +678,11 @@
 		const message = event.data || {};
 		if (message.source !== 'circloo-tas-app') return;
 		if (message.type === 'START_BRUTEFORCE') startBruteforce(message);
+		if (message.type === 'RUN_TRIAL') runTrialRequest(message);
 		if (message.type === 'STOP_BRUTEFORCE') {
 			running = false;
 			pendingStart = null;
+			pendingTrial = null;
 			W.postMessage({ source: 'circloo-tas-worker', type: 'BRUTEFORCE_STOPPED' });
 		}
 	});

@@ -40,7 +40,9 @@ export type BruteforceProgress = {
 	lastReached: boolean;
 	improvements: number;
 	mode: string;
-	resumeFrame: number | null;
+	rewindFrame: number | null;
+	snapshotCount: number;
+	optimizerBuildMs: number;
 	verified: number;
 	debug?: BruteforceDebug;
 	error?: string;

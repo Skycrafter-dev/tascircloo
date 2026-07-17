@@ -506,6 +506,55 @@
 		return runLocalTrial(script, trialOptions());
 	}
 
+
+	function createSearchOptimizer(base, options, settings) {
+		const suffix =
+			typeof W.__circlooTasCreateAdaptiveFinishOptimizer === 'function'
+				? W.__circlooTasCreateAdaptiveFinishOptimizer(base, options)
+				: null;
+		const minimumMutationFrame = Math.max(0, finiteFrame(settings && settings.minFrame, 0));
+		const dynamic =
+			(!suffix || minimumMutationFrame < suffix.resumeFrame) &&
+			typeof W.__circlooTasCreateDynamicFinishOptimizer === 'function'
+				? W.__circlooTasCreateDynamicFinishOptimizer(base, options)
+				: null;
+		if (!suffix && !dynamic) return null;
+
+		let lastRewindFrame = suffix ? suffix.resumeFrame : dynamic ? dynamic.rewindFrame : null;
+		return {
+			get rewindFrame() {
+				return lastRewindFrame;
+			},
+			get snapshotCount() {
+				return (suffix ? suffix.snapshotCount : 0) + (dynamic ? dynamic.snapshotCount : 0);
+			},
+			get buildMs() {
+				return (suffix ? suffix.buildMs : 0) + (dynamic ? dynamic.buildMs : 0);
+			},
+			evaluate(candidate) {
+				let result;
+				if (suffix && suffix.prefixMatches(candidate)) result = suffix.evaluate(candidate);
+				else if (dynamic) result = dynamic.evaluate(candidate);
+				else result = suffix.evaluate(candidate);
+				if (result && result.debug && Number.isFinite(Number(result.debug.rewindFrame))) {
+					lastRewindFrame = Number(result.debug.rewindFrame);
+				}
+				return result;
+			},
+			restoreVerifier() {
+				return dynamic && typeof dynamic.restoreVerifier === 'function'
+					? dynamic.restoreVerifier()
+					: true;
+			},
+			rebuild(nextBase) {
+				let rebuilt = true;
+				if (suffix) rebuilt = suffix.rebuild(nextBase) && rebuilt;
+				if (dynamic) rebuilt = dynamic.rebuild(nextBase) && rebuilt;
+				return rebuilt;
+			}
+		};
+	}
+
 	function runTrialRequest(message) {
 		if (!runtimeReady) {
 			pendingTrial = message;
@@ -568,8 +617,10 @@
 			improvements: current.improvements,
 			debug: debugPayload(),
 			rate: current.trials / elapsedSeconds,
-			mode: current.optimizer ? 'level1-finish-resume' : 'full-runtime',
-			resumeFrame: current.optimizer ? current.optimizer.resumeFrame : null,
+			mode: current.optimizer ? 'level1-adaptive-rewind' : 'full-runtime',
+			rewindFrame: current.optimizer ? current.optimizer.rewindFrame : null,
+			snapshotCount: current.optimizer ? current.optimizer.snapshotCount : 0,
+			optimizerBuildMs: current.optimizer ? current.optimizer.buildMs : 0,
 			verified: current.verified
 		});
 	}
@@ -593,9 +644,15 @@
 		current.trials += 1;
 
 		if (result.reached && result.score < current.bestScore) {
+			if (current.optimizer && !current.optimizer.restoreVerifier()) {
+				throw new Error('Failed to restore exact verification runtime');
+			}
 			const verified = trial(candidate);
 			current.verified += 1;
 			if (verified.reached && verified.score < current.bestScore) {
+				if (current.optimizer && !current.optimizer.rebuild(candidate)) {
+					throw new Error('Failed to rebuild deterministic rewind snapshots');
+				}
 				current.best = candidate;
 				current.bestScore = verified.score;
 				current.bestReached = true;
@@ -654,21 +711,13 @@
 				finishCP: settings.finishCP,
 				maxFrames: settings.maxFrames,
 				warmup: settings.warmup,
-				seed: 0
+				seed: 0,
+				minFrame: settings.minFrame,
+				maxFrame: settings.maxFrame,
+				snapshotStride: 32
 			};
-			const optimizer =
-				typeof W.__circlooTasCreateFinishOptimizer === 'function'
-					? W.__circlooTasCreateFinishOptimizer(base, options)
-					: null;
+			const optimizer = createSearchOptimizer(base, options, settings);
 			const searchSettings = { ...settings };
-			if (optimizer) {
-				searchSettings.minFrame = Math.max(finiteFrame(settings.minFrame, 0), optimizer.resumeFrame);
-				const configuredMax = finiteFrame(settings.maxFrame, 0);
-				searchSettings.maxFrame = Math.max(
-					searchSettings.minFrame,
-					configuredMax > 0 ? configuredMax : finiteFrame(settings.maxFrames, optimizer.resumeFrame)
-				);
-			}
 
 			current = {
 				settings,

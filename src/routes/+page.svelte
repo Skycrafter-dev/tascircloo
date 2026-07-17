@@ -75,7 +75,9 @@
 		startedAt: 0,
 		rate: 0,
 		mode: '',
-		resumeFrame: null as number | null,
+		rewindFrame: null as number | null,
+		snapshotCount: 0,
+		optimizerBuildMs: 0,
 		verified: 0,
 		debug: null as BruteforceDebug | null,
 		lastError: ''
@@ -294,7 +296,9 @@
 				bruteforce.improvements = message.improvements;
 				bruteforce.rate = message.rate;
 				bruteforce.mode = message.mode;
-				bruteforce.resumeFrame = message.resumeFrame;
+				bruteforce.rewindFrame = message.rewindFrame;
+				bruteforce.snapshotCount = message.snapshotCount;
+				bruteforce.optimizerBuildMs = message.optimizerBuildMs;
 				bruteforce.verified = message.verified;
 				bruteforce.debug = message.debug ?? bruteforce.debug;
 				bruteforce.lastError = message.error ?? '';
@@ -338,7 +342,9 @@
 		bruteforce.startedAt = performance.now();
 		bruteforce.rate = 0;
 		bruteforce.mode = '';
-		bruteforce.resumeFrame = null;
+		bruteforce.rewindFrame = null;
+		bruteforce.snapshotCount = 0;
+		bruteforce.optimizerBuildMs = 0;
 		bruteforce.verified = 0;
 		bruteforce.debug = null;
 		bruteforce.lastError = '';
@@ -572,8 +578,8 @@
 					</label>
 					<label>
 						<span class="setting-label">
-							Min Frame
-							<span class="info-dot" aria-label="Lowest frame the bruteforce may modify." data-tip="Lowest script frame the bruteforce may add, move, delete, or change. Optimized Level 1 finish search keeps all inputs before its displayed resume frame fixed.">
+							Modify from
+							<span class="info-dot" aria-label="Earliest frame the bruteforce may modify." data-tip="Inputs before this frame are never added, moved, deleted, or changed. This setting does not choose the rewind point; each candidate rewinds to the nearest deterministic snapshot before its earliest changed input.">
 								<Info size={13} />
 							</span>
 						</span>
@@ -581,8 +587,8 @@
 					</label>
 					<label>
 						<span class="setting-label">
-							Max Frame
-							<span class="info-dot" aria-label="Highest frame the bruteforce may modify." data-tip="Highest script frame the bruteforce may add, move, delete, or change. Set 0 to use Max frames.">
+							Modify through
+							<span class="info-dot" aria-label="Latest frame the bruteforce may modify." data-tip="Highest script frame the bruteforce may add, move, delete, or change. Set 0 to use Max frames.">
 								<Info size={13} />
 							</span>
 						</span>
@@ -634,10 +640,12 @@
 					<span>{bruteforce.improvements} improvements</span>
 					<span>{bruteforce.verified} exact checks</span>
 					{#if bruteforce.mode}
-						<span>{bruteforce.mode === 'level1-finish-resume' ? 'single-worker resume' : 'full runtime'}</span>
+						<span>{bruteforce.mode === 'level1-adaptive-rewind' ? 'adaptive rewind' : 'full runtime'}</span>
 					{/if}
-					{#if bruteforce.resumeFrame != null}
-						<span>resume frame {bruteforce.resumeFrame}</span>
+					{#if bruteforce.rewindFrame != null}
+						<span>last rewind {bruteforce.rewindFrame}</span>
+						<span>{bruteforce.snapshotCount} snapshots</span>
+						<span>snapshot build {debugMs(bruteforce.optimizerBuildMs)}ms</span>
 					{/if}
 				</div>
 				{#if bruteforce.debug}

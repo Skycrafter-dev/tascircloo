@@ -1963,6 +1963,24 @@
 			return id;
 		};
 		W.cancelAnimationFrame = (id) => rafs.delete(id);
+		W.__circlooTasCaptureFastClock = () => ({
+			simTime,
+			nextId,
+			timers: [...timers.entries()].map(([id, timer]) => [id, { ...timer, args: timer.args.slice() }]),
+			rafs: [...rafs.entries()]
+		});
+		W.__circlooTasRestoreFastClock = (snapshot) => {
+			if (!snapshot) return false;
+			simTime = Number(snapshot.simTime) || 0;
+			nextId = Math.max(1, Math.floor(Number(snapshot.nextId) || 1));
+			timers.clear();
+			for (const [id, timer] of snapshot.timers || []) {
+				timers.set(id, { ...timer, args: Array.isArray(timer.args) ? timer.args.slice() : [] });
+			}
+			rafs.clear();
+			for (const [id, callback] of snapshot.rafs || []) rafs.set(id, callback);
+			return true;
+		};
 
 		try {
 			Object.defineProperty(W.performance, 'now', { value: () => simTime, configurable: true, writable: true });
@@ -2222,7 +2240,14 @@
 				keys.push(key);
 				values.push(workingValue(descriptor.value));
 			}
-			plans.push({ type: Array.isArray(source) ? 'array' : 'object', source, target, keys, values });
+			plans.push({
+				type: Array.isArray(source) ? 'array' : 'object',
+				source,
+				target,
+				keys,
+				keySet: new Set(keys),
+				values
+			});
 		}
 
 		return function restoreSimulationGraph() {
@@ -2250,11 +2275,157 @@
 					continue;
 				}
 				if (plan.type === 'array') plan.target.length = plan.source.length;
+				for (const key of Reflect.ownKeys(plan.target)) {
+					if ((plan.type === 'array' && key === 'length') || plan.keySet.has(key)) continue;
+					const descriptor = Object.getOwnPropertyDescriptor(plan.target, key);
+					if (descriptor && descriptor.configurable) {
+						try {
+							delete plan.target[key];
+						} catch {}
+					}
+				}
 				for (let index = 0; index < plan.keys.length; index++) {
 					plan.target[plan.keys[index]] = plan.values[index];
 				}
 			}
 		};
+	}
+
+	function captureRuntimeScalars() {
+		const out = {};
+		for (const name of Object.getOwnPropertyNames(W)) {
+			if (!/^_[A-Za-z0-9_$]+$/.test(name)) continue;
+			const descriptor = Object.getOwnPropertyDescriptor(W, name);
+			if (!descriptor || !('value' in descriptor) || descriptor.writable === false) continue;
+			const value = descriptor.value;
+			if (
+				value == null ||
+				typeof value === 'number' ||
+				typeof value === 'string' ||
+				typeof value === 'boolean'
+			) {
+				out[name] = value;
+			}
+		}
+		return out;
+	}
+
+	function restoreRuntimeScalars(values) {
+		for (const [name, value] of Object.entries(values || {})) {
+			const descriptor = Object.getOwnPropertyDescriptor(W, name);
+			if (!descriptor || !('value' in descriptor) || descriptor.writable === false) continue;
+			try {
+				W[name] = value;
+			} catch {}
+		}
+		return true;
+	}
+
+	function installRuntimeRoot(root) {
+		return !!callGlobal(
+			[
+				'var root = args[0];',
+				'if (!root) return false;',
+				'if (typeof _Ux !== "undefined") _Ux = root.room;',
+				'if (typeof _cd !== "undefined") _cd = root.builtins;',
+				'if (typeof global !== "undefined") global = root.gameGlobal;',
+				'if (typeof _Xx !== "undefined") _Xx = root.runner;',
+				'if (typeof _Gx !== "undefined") _Gx = root.objects;',
+				'if (typeof __11 !== "undefined") __11 = root.instances;',
+				'if (typeof _ZG !== "undefined") _ZG = root.input;',
+				'if (typeof _OE !== "undefined") _OE = root.particles;',
+				'if (typeof _Q71 !== "undefined") _Q71 = root.timeline;',
+				'if (typeof _yU !== "undefined") _yU = root.sequence;',
+				'if (typeof _H31 !== "undefined") _H31 = root.roomQueue;',
+				'if (typeof _iz2 !== "undefined") _iz2 = root.particleInstances;',
+				'return true;'
+			].join('\n'),
+			root
+		);
+	}
+
+	function captureReplaySimulationState() {
+		return {
+			playLevel: state.playLevel,
+			scriptUnfreezeConsumed: state.scriptUnfreezeConsumed,
+			physicsFrozen: state.physicsFrozen,
+			unfreezeStarted: state.unfreezeStarted,
+			prestartRemaining: state.prestartRemaining,
+			prestartElapsed: state.prestartElapsed,
+			unfreezeSource: state.unfreezeSource,
+			freezeLevel: state.freezeLevel,
+			freezeRoom: state.freezeRoom,
+			freezeLastFrame: state.freezeLastFrame,
+			freezePlayerId: state.freezePlayerId,
+			freezeBigId: state.freezeBigId,
+			lastFrameSeen: state.lastFrameSeen,
+			lastLevelSeen: state.lastLevelSeen,
+			lastCP: state.lastCP,
+			collectedCP: state.collectedCP,
+			cpTimes: state.cpTimes.slice()
+		};
+	}
+
+	function restoreReplaySimulationState(snapshot, script, frame) {
+		const normalized = normalizeScript(script);
+		state.script = normalized;
+		state.virtualEnabled = true;
+		state.playbackMode = true;
+		state.paused = false;
+		state.playLevel = snapshot.playLevel;
+		state.scriptUnfreezeConsumed = snapshot.scriptUnfreezeConsumed;
+		state.physicsFrozen = snapshot.physicsFrozen;
+		state.unfreezeStarted = snapshot.unfreezeStarted;
+		state.prestartRemaining = snapshot.prestartRemaining;
+		state.prestartElapsed = snapshot.prestartElapsed;
+		state.unfreezeSource = snapshot.unfreezeSource;
+		state.freezeLevel = snapshot.freezeLevel;
+		state.freezeRoom = snapshot.freezeRoom;
+		state.freezeLastFrame = snapshot.freezeLastFrame;
+		state.freezePlayerId = snapshot.freezePlayerId;
+		state.freezeBigId = snapshot.freezeBigId;
+		state.lastFrameSeen = snapshot.lastFrameSeen;
+		state.lastLevelSeen = snapshot.lastLevelSeen;
+		state.lastCP = snapshot.lastCP;
+		state.collectedCP = snapshot.collectedCP;
+		state.cpTimes = snapshot.cpTimes.slice();
+		state.exactCheckpointMode = true;
+		state.capture = [];
+		state.captureInputSample = null;
+		state.captureDebug = [];
+		state.lastCaptureInput = null;
+		state.lastPlayer = null;
+		state.consumedInput = inputAtFrame(normalized, frame - 1);
+		state.virtual = parseInput(state.consumedInput);
+		state.prevVirtual = parseInput(inputAtFrame(normalized, frame - 2));
+		state.domHeld = { L: false, R: false };
+		state.playLastFrame = frame - 1;
+		state.inputLatchedFrame = frame > 0 ? frame - 1 : null;
+		state.playIndex = 0;
+		while (
+			state.playIndex < normalized.length &&
+			(normalized[state.playIndex].input === 'U' || normalized[state.playIndex].frame < frame)
+		) {
+			state.playIndex++;
+		}
+	}
+
+	function earliestInputDifference(leftScript, rightScript) {
+		const left = normalizeScript(leftScript).filter((entry) => entry.input !== 'U');
+		const right = normalizeScript(rightScript).filter((entry) => entry.input !== 'U');
+		const frames = [...new Set([...left.map((entry) => entry.frame), ...right.map((entry) => entry.frame)])].sort(
+			(a, b) => a - b
+		);
+		let leftIndex = 0;
+		let rightIndex = 0;
+		let leftInput = '.';
+		let rightInput = '.';
+		for (const frame of frames) {
+			while (leftIndex < left.length && left[leftIndex].frame <= frame) leftInput = left[leftIndex++].input;
+			while (rightIndex < right.length && right[rightIndex].frame <= frame) rightInput = right[rightIndex++].input;
+			if (leftInput !== rightInput) return frame;
+		}
+		return Infinity;
 	}
 
 	function inputAtFrame(script, frame) {
@@ -2491,6 +2662,569 @@
 		}
 	}
 
+	function createLevelOneAdaptiveFinishOptimizer(script, options = {}) {
+		if (!IS_SIM) return null;
+		const level = Math.max(0, Math.floor(Number(options.level) || 0));
+		const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
+		if (level !== 1 || options.target !== 'finish' || finishCP !== 6) return null;
+
+		const prefixCP = finishCP - 1;
+		const maxFrames = Math.max(1, Math.floor(Number(options.maxFrames) || 1));
+		const seed = Number.isFinite(Number(options.seed))
+			? Math.trunc(Number(options.seed)) | 0
+			: DEFAULT_GAMEPLAY_SEED;
+		const snapshotStride = Math.max(4, Math.floor(Number(options.fastSnapshotStride) || 8));
+		let baseScript = normalizeScript(script);
+		let snapshots = [];
+		let baseResult = null;
+		let resumeFrame = null;
+		let lastRewindFrame = null;
+		let buildMs = 0;
+
+		function captureFinishCircles() {
+			return (
+				callGlobal(
+					[
+						'var out = [];',
+						'var object = typeof _Gx !== "undefined" && _Gx ? _Gx._qH(21) : null;',
+						'var list = object && object._Ln2 ? object._Ln2._OH : null;',
+						'if (!list) return out;',
+						'for (var i = 0; i < list.length; i++) {',
+						'  var circle = list[i];',
+						'  if (circle && !circle._qf && circle._rf && !(Number(circle._ye) > 0.5)) {',
+						'    out.push({ x: Number(circle.x), y: Number(circle.y) });',
+						'  }',
+						'}',
+						'return out;'
+					].join('\n')
+				) || []
+			);
+		}
+
+		function captureSuffixSnapshot(frame, prefixTimes) {
+			const wrapper = physicsWrapper();
+			const liveWorld = physicsWorld();
+			const livePlayer = gmPlayer();
+			const liveBody = livePlayer && livePlayer._Xd1 && livePlayer._Xd1._932;
+			if (!wrapper || !liveWorld || !livePlayer || !liveBody) return null;
+
+			const templateGraph = cloneSimulationGraph(liveWorld, { proxyGameMakerInstances: true });
+			const templateBody = templateGraph.map.get(liveBody);
+			if (!templateBody) return null;
+			const noContactListener = { _6E1() {}, _7E1() {}, _8E1() {}, _aE1() {} };
+			if (templateGraph.root._eC1) templateGraph.root._eC1._0F1 = noContactListener;
+
+			return {
+				frame,
+				templateRoot: templateGraph.root,
+				templateBody,
+				prefixKey: scriptPrefixKey(baseScript, frame),
+				prefixTimes: prefixTimes.slice(),
+				initialInput: inputAtFrame(baseScript, frame),
+				circleData: captureFinishCircles(),
+				scale: Number(wrapper._sd1),
+				stepRate: Number(wrapper._K62),
+				iterations: Number(wrapper._L62),
+				roomSpeed: Number(callGlobal('return typeof _Ux !== "undefined" && _Ux ? _Ux._AJ2 : null;')),
+				inputScale: Number(livePlayer._Ot) || 1,
+				extraInput: !!callGlobal('return !!(typeof global !== "undefined" && global && global._Fc);'),
+				collectRadius: 24 + (Number(livePlayer._jd) || 0)
+			};
+		}
+
+		function rebuild(nextBaseScript) {
+			const started = REAL.now();
+			baseScript = normalizeScript(nextBaseScript);
+			const nextSnapshots = [];
+			state.exactCheckpointMode = true;
+			try {
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+				const prepared = prepareSimTrialLevel(level, seed);
+				if (!prepared.ready) return false;
+
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+				armReplay(baseScript);
+				resetFreeze(gmLevel());
+				let suffixStart = null;
+				let reached = false;
+				let score = Infinity;
+				const baseInputFrames = new Set(
+					baseScript.filter((entry) => entry.input !== 'U').map((entry) => entry.frame)
+				);
+
+				for (let index = 0; index < maxFrames; index++) {
+					const frame = gameFrame();
+					if (
+						suffixStart !== null &&
+						(frame === suffixStart || (frame - suffixStart) % snapshotStride === 0 || baseInputFrames.has(frame))
+					) {
+						const snapshot = captureSuffixSnapshot(frame, state.cpTimes.slice(0, prefixCP + 1));
+						if (snapshot) nextSnapshots.push(snapshot);
+					}
+
+					W.__circlooTasPumpFrame();
+					if (
+						suffixStart === null &&
+						state.cpTimes[prefixCP] != null &&
+						gameFrame() >= state.cpTimes[prefixCP] + 10 &&
+						state.collectedCP >= prefixCP &&
+						radiusCP() >= prefixCP
+					) {
+						suffixStart = gameFrame();
+					}
+					if (state.collectedCP >= finishCP) {
+						reached = true;
+						score = gameFrame();
+						break;
+					}
+				}
+
+				if (suffixStart === null || !nextSnapshots.length) return false;
+				snapshots = nextSnapshots.sort((left, right) => left.frame - right.frame);
+				resumeFrame = snapshots[0].frame;
+				baseResult = {
+					reached,
+					score,
+					cp: state.collectedCP,
+					times: state.cpTimes.slice(),
+					debug: {
+						trialMs: 0,
+						prepareMs: 0,
+						pumpMs: 0,
+						frames: 0,
+						prepPumps: prepared.prepPumps,
+						rewindFrame: score,
+						fast: true
+					}
+				};
+				lastRewindFrame = resumeFrame;
+				buildMs = REAL.now() - started;
+				return true;
+			} finally {
+				stopReplay();
+				state.exactCheckpointMode = false;
+			}
+		}
+
+		function chooseSnapshot(differenceFrame) {
+			let selected = snapshots[0];
+			for (const snapshot of snapshots) {
+				if (snapshot.frame > differenceFrame) break;
+				selected = snapshot;
+			}
+			return selected;
+		}
+
+		function evaluate(candidate) {
+			const candidateScript = normalizeScript(candidate);
+			const differenceFrame = earliestInputDifference(baseScript, candidateScript);
+			if (!Number.isFinite(differenceFrame) || (baseResult.reached && differenceFrame >= baseResult.score)) {
+				lastRewindFrame = baseResult.reached ? baseResult.score : resumeFrame;
+				return {
+					...baseResult,
+					times: baseResult.times.slice(),
+					debug: { ...baseResult.debug, rewindFrame: lastRewindFrame, differenceFrame, frames: 0 }
+				};
+			}
+			if (differenceFrame < resumeFrame) {
+				return {
+					reached: false,
+					score: Infinity,
+					cp: prefixCP,
+					times: [],
+					incompatiblePrefix: true,
+					debug: { rewindFrame: resumeFrame, differenceFrame, frames: 0, fast: true }
+				};
+			}
+
+			const snapshot = chooseSnapshot(differenceFrame);
+			if (scriptPrefixKey(candidateScript, snapshot.frame) !== snapshot.prefixKey) {
+				return {
+					reached: false,
+					score: Infinity,
+					cp: prefixCP,
+					times: snapshot.prefixTimes.slice(),
+					incompatiblePrefix: true,
+					debug: { rewindFrame: snapshot.frame, differenceFrame, frames: 0, fast: true }
+				};
+			}
+
+			lastRewindFrame = snapshot.frame;
+			const restoreStart = REAL.now();
+			const workingGraph = cloneSimulationGraph(snapshot.templateRoot);
+			const workingBody = workingGraph.map.get(snapshot.templateBody);
+			const workingWorld = workingGraph.root;
+			if (!workingBody || !workingWorld) {
+				return {
+					reached: false,
+					score: Infinity,
+					cp: prefixCP,
+					times: snapshot.prefixTimes.slice(),
+					debug: { rewindFrame: snapshot.frame, differenceFrame, frames: 0, fast: true }
+				};
+			}
+			const restoreMs = REAL.now() - restoreStart;
+			let frame = snapshot.frame;
+			let input = snapshot.initialInput;
+			let entryIndex = 0;
+			while (
+				entryIndex < candidateScript.length &&
+				(candidateScript[entryIndex].input === 'U' || candidateScript[entryIndex].frame < snapshot.frame)
+			) {
+				entryIndex++;
+			}
+			const velocityPrototype = Object.getPrototypeOf(workingBody._zC1());
+			const setHorizontalVelocity = (value) => {
+				const current = workingBody._zC1();
+				const velocity = Object.create(velocityPrototype);
+				velocity.x = value;
+				velocity.y = current.y;
+				workingBody._yC1(velocity);
+				workingBody._pd1(true);
+			};
+			const nudgeHorizontalVelocity = (amount) => {
+				const current = workingBody._zC1();
+				setHorizontalVelocity(
+					((current.x / snapshot.scale / snapshot.roomSpeed) + amount) *
+						snapshot.scale *
+						snapshot.roomSpeed
+				);
+			};
+			const applyInput = (nextInput) => {
+				if (nextInput.includes('L')) nudgeHorizontalVelocity(-0.52 * snapshot.inputScale);
+				if (nextInput.includes('R')) nudgeHorizontalVelocity(0.52 * snapshot.inputScale);
+				if (snapshot.extraInput && nextInput.includes('L')) nudgeHorizontalVelocity(-0.01);
+				if (snapshot.extraInput && nextInput.includes('R')) nudgeHorizontalVelocity(0.01);
+			};
+
+			const pumpStart = REAL.now();
+			while (frame < maxFrames) {
+				while (entryIndex < candidateScript.length && candidateScript[entryIndex].frame <= frame) {
+					if (candidateScript[entryIndex].input !== 'U') input = candidateScript[entryIndex].input;
+					entryIndex++;
+				}
+				applyInput(input);
+				frame++;
+				const position = workingBody._Rc1();
+				const playerX = position.x / snapshot.scale;
+				const playerY = position.y / snapshot.scale;
+				for (const circle of snapshot.circleData) {
+					const dx = playerX - circle.x;
+					const dy = playerY - circle.y;
+					if (dx * dx + dy * dy < snapshot.collectRadius * snapshot.collectRadius) {
+						const times = snapshot.prefixTimes.slice();
+						times[finishCP] = frame;
+						return {
+							reached: true,
+							score: frame,
+							cp: finishCP,
+							times,
+							debug: {
+								trialMs: restoreMs + (REAL.now() - pumpStart),
+								prepareMs: restoreMs,
+								pumpMs: REAL.now() - pumpStart,
+								frames: frame - snapshot.frame,
+								prepPumps: 0,
+								rewindFrame: snapshot.frame,
+								differenceFrame,
+								fast: true
+							}
+						};
+					}
+				}
+				workingWorld._jF1(1 / snapshot.stepRate, snapshot.iterations, snapshot.iterations);
+				workingWorld._nF1();
+			}
+
+			return {
+				reached: false,
+				score: Infinity,
+				cp: prefixCP,
+				times: snapshot.prefixTimes.slice(),
+				debug: {
+					trialMs: restoreMs + (REAL.now() - pumpStart),
+					prepareMs: restoreMs,
+					pumpMs: REAL.now() - pumpStart,
+					frames: frame - snapshot.frame,
+					prepPumps: 0,
+					rewindFrame: snapshot.frame,
+					differenceFrame,
+					fast: true
+				}
+			};
+		}
+
+		if (!rebuild(baseScript)) return null;
+		return {
+			level,
+			finishCP,
+			get resumeFrame() {
+				return resumeFrame;
+			},
+			get lastRewindFrame() {
+				return lastRewindFrame;
+			},
+			get snapshotCount() {
+				return snapshots.length;
+			},
+			get buildMs() {
+				return buildMs;
+			},
+			evaluate,
+			rebuild,
+			prefixMatches(candidate) {
+				return earliestInputDifference(baseScript, candidate) >= resumeFrame;
+			}
+		};
+	}
+
+	function createLevelOneDynamicFinishOptimizer(script, options = {}) {
+		if (!IS_SIM) return null;
+		const level = Math.max(0, Math.floor(Number(options.level) || 0));
+		const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
+		if (level !== 1 || options.target !== 'finish' || finishCP !== 6) return null;
+
+		const maxFrames = Math.max(1, Math.floor(Number(options.maxFrames) || 1));
+		const minFrame = Math.max(0, Math.floor(Number(options.minFrame) || 0));
+		const configuredMaxFrame = Math.max(0, Math.floor(Number(options.maxFrame) || 0));
+		const maxMutationFrame = configuredMaxFrame > 0 ? configuredMaxFrame : maxFrames;
+		const snapshotStride = Math.max(8, Math.floor(Number(options.snapshotStride) || 32));
+		const seed = Number.isFinite(Number(options.seed))
+			? Math.trunc(Number(options.seed)) | 0
+			: DEFAULT_GAMEPLAY_SEED;
+		let baseScript = normalizeScript(script);
+		let snapshots = [];
+		let baseResult = null;
+		let lastRewindFrame = 0;
+		let buildMs = 0;
+		let verifierRoot = null;
+		let verifierScalars = null;
+		let verifierClock = null;
+
+		function runtimeRoot() {
+			return callGlobal(
+				[
+					'return {',
+					'  room: _Ux, builtins: _cd, gameGlobal: global, runner: _Xx, objects: _Gx, instances: __11,',
+					'  input: (typeof _ZG !== "undefined" ? _ZG : null),',
+					'  particles: (typeof _OE !== "undefined" ? _OE : null),',
+					'  timeline: (typeof _Q71 !== "undefined" ? _Q71 : null),',
+					'  sequence: (typeof _yU !== "undefined" ? _yU : null),',
+					'  roomQueue: (typeof _H31 !== "undefined" ? _H31 : null),',
+					'  particleInstances: (typeof _iz2 !== "undefined" ? _iz2 : null)',
+					'};'
+				].join('\n')
+			);
+		}
+
+		function captureSnapshot(frame) {
+			const templateGraph = cloneSimulationGraph(runtimeRoot(), { proxyGameMakerInstances: false });
+			return {
+				frame,
+				templateRoot: templateGraph.root,
+				scalars: captureRuntimeScalars(),
+				replay: captureReplaySimulationState(),
+				clock:
+					typeof W.__circlooTasCaptureFastClock === 'function'
+						? W.__circlooTasCaptureFastClock()
+						: null
+			};
+		}
+
+		function snapshotFramesFor(nextBase) {
+			const frames = new Set([0, minFrame]);
+			for (let frame = minFrame; frame <= maxMutationFrame && frame < maxFrames; frame += snapshotStride) {
+				frames.add(frame);
+			}
+			for (const entry of nextBase) {
+				if (entry.input !== 'U' && entry.frame >= minFrame && entry.frame <= maxMutationFrame) {
+					frames.add(entry.frame);
+				}
+			}
+			return frames;
+		}
+
+		function rebuild(nextBaseScript) {
+			const started = REAL.now();
+			baseScript = normalizeScript(nextBaseScript);
+			const wantedFrames = snapshotFramesFor(baseScript);
+			const nextSnapshots = [];
+			state.exactCheckpointMode = true;
+			try {
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+				const prepared = prepareSimTrialLevel(level, seed);
+				if (!prepared.ready) return false;
+
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+				armReplay(baseScript);
+				resetFreeze(gmLevel());
+				let reached = false;
+				let score = Infinity;
+				for (let index = 0; index < maxFrames; index++) {
+					const frame = gameFrame();
+					if (wantedFrames.has(frame)) nextSnapshots.push(captureSnapshot(frame));
+					W.__circlooTasPumpFrame();
+					if (!reached && state.collectedCP >= finishCP) {
+						reached = true;
+						score = gameFrame();
+						break;
+					}
+				}
+
+				if (!nextSnapshots.length || nextSnapshots[0].frame !== 0) return false;
+				snapshots = nextSnapshots.sort((left, right) => left.frame - right.frame);
+				baseResult = {
+					reached,
+					score,
+					cp: state.collectedCP,
+					times: state.cpTimes.slice(),
+					debug: {
+						trialMs: 0,
+						prepareMs: 0,
+						pumpMs: 0,
+						frames: score === Infinity ? maxFrames : score,
+						prepPumps: prepared.prepPumps,
+						rewindFrame: 0,
+						fast: true
+					}
+				};
+				verifierRoot = runtimeRoot();
+				verifierScalars = captureRuntimeScalars();
+				verifierClock =
+					typeof W.__circlooTasCaptureFastClock === 'function'
+						? W.__circlooTasCaptureFastClock()
+						: null;
+				lastRewindFrame = 0;
+				buildMs = REAL.now() - started;
+				return true;
+			} finally {
+				stopReplay();
+				state.exactCheckpointMode = false;
+			}
+		}
+
+		function chooseSnapshot(differenceFrame) {
+			let selected = snapshots[0];
+			for (const snapshot of snapshots) {
+				if (snapshot.frame > differenceFrame) break;
+				selected = snapshot;
+			}
+			return selected;
+		}
+
+		function evaluate(candidate) {
+			const candidateScript = normalizeScript(candidate);
+			const differenceFrame = earliestInputDifference(baseScript, candidateScript);
+			if (!Number.isFinite(differenceFrame)) {
+				lastRewindFrame = baseResult && Number.isFinite(baseResult.score) ? baseResult.score : 0;
+				return {
+					...baseResult,
+					times: baseResult.times.slice(),
+					debug: { ...baseResult.debug, rewindFrame: lastRewindFrame, frames: 0 }
+				};
+			}
+
+			const restored = restoreCandidate(candidateScript, differenceFrame);
+			const snapshot = restored.snapshot;
+			const restoreMs = restored.restoreMs;
+			const pumpStart = REAL.now();
+			let frames = 0;
+			let reached = state.collectedCP >= finishCP;
+			let score = reached ? gameFrame() : Infinity;
+			const maxPumps = Math.max(0, maxFrames - snapshot.frame);
+			while (!reached && frames < maxPumps) {
+				W.__circlooTasPumpFrame();
+				frames++;
+				if (state.collectedCP >= finishCP) {
+					reached = true;
+					score = gameFrame();
+				}
+			}
+			const pumpMs = REAL.now() - pumpStart;
+			return {
+				reached,
+				score,
+				cp: state.collectedCP,
+				times: state.cpTimes.slice(),
+				debug: {
+					trialMs: restoreMs + pumpMs,
+					prepareMs: restoreMs,
+					pumpMs,
+					frames,
+					prepPumps: 0,
+					rewindFrame: snapshot.frame,
+					differenceFrame,
+					fast: true
+				}
+			};
+		}
+
+		function restoreCandidate(candidateScript, differenceFrame = earliestInputDifference(baseScript, candidateScript)) {
+			const normalizedCandidate = normalizeScript(candidateScript);
+			const snapshot = chooseSnapshot(Number.isFinite(differenceFrame) ? differenceFrame : 0);
+			lastRewindFrame = snapshot.frame;
+			const restoreStart = REAL.now();
+			const workingGraph = cloneSimulationGraph(snapshot.templateRoot, { proxyGameMakerInstances: false });
+			installRuntimeRoot(workingGraph.root);
+			restoreRuntimeScalars(snapshot.scalars);
+			if (snapshot.clock && typeof W.__circlooTasRestoreFastClock === 'function') {
+				W.__circlooTasRestoreFastClock(snapshot.clock);
+			}
+			restoreReplaySimulationState(snapshot.replay, normalizedCandidate, snapshot.frame);
+			return {
+				snapshot,
+				restoreMs: REAL.now() - restoreStart,
+				frame: gameFrame(),
+				cp: state.collectedCP,
+				room: simRoomId(),
+				hasPlayer: !!gmPlayer(),
+				hasPhysics: simHasPhysicsWorld()
+			};
+		}
+
+		function restoreVerifier() {
+			if (!verifierRoot) return false;
+			installRuntimeRoot(verifierRoot);
+			restoreRuntimeScalars(verifierScalars);
+			if (verifierClock && typeof W.__circlooTasRestoreFastClock === 'function') {
+				W.__circlooTasRestoreFastClock(verifierClock);
+			}
+			stopReplay();
+			state.exactCheckpointMode = false;
+			return true;
+		}
+
+		if (!rebuild(baseScript)) return null;
+		return {
+			level,
+			finishCP,
+			get resumeFrame() {
+				return lastRewindFrame;
+			},
+			get rewindFrame() {
+				return lastRewindFrame;
+			},
+			get snapshotCount() {
+				return snapshots.length;
+			},
+			get buildMs() {
+				return buildMs;
+			},
+			evaluate,
+			restoreCandidate,
+			restoreVerifier,
+			rebuild
+		};
+	}
+
 	function simTrial(script, options) {
 		state.exactCheckpointMode = true;
 		const trialStart = REAL.now();
@@ -2556,6 +3290,8 @@
 
 	W.__circlooTasRunTrial = simTrial;
 	W.__circlooTasCreateFinishOptimizer = createLevelOneFinishOptimizer;
+	W.__circlooTasCreateAdaptiveFinishOptimizer = createLevelOneAdaptiveFinishOptimizer;
+	W.__circlooTasCreateDynamicFinishOptimizer = createLevelOneDynamicFinishOptimizer;
 	W.__circlooTasPatchGameHooks = patchGameHooks;
 	W.__circlooTasRequestReplay = requestCanonicalReplay;
 

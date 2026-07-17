@@ -672,6 +672,14 @@
 		return wrapper && wrapper._FB1 ? wrapper._FB1 : wrapper;
 	}
 
+	function bootstrapCanonicalPhysics() {
+		const wrapper = physicsWrapper();
+		const step = Number(callGlobal('return typeof _Ux !== "undefined" && _Ux ? _Ux._AJ2 : null;'));
+		if (!wrapper || typeof wrapper._nG !== 'function' || !Number.isFinite(step) || step <= 0) return false;
+		wrapper._nG(step);
+		return true;
+	}
+
 	function finiteNumber(value) {
 		const n = Number(value);
 		return Number.isFinite(n) ? n : null;
@@ -1847,6 +1855,10 @@
 			return;
 		}
 
+		if (!bootstrapCanonicalPhysics()) {
+			failCanonicalRun('Unable to bootstrap the canonical physics state');
+			return;
+		}
 		if (!resetGameMakerRuntimeState()) {
 			failCanonicalRun('Unable to canonicalize the tick-zero runtime state');
 			return;
@@ -2086,12 +2098,13 @@
 			debug.restartPumps++;
 			allowPrepPump();
 		}
+		const bootstrapped = freshLevelReady() && bootstrapCanonicalPhysics();
 		resetFreeze(gmLevel());
 
 		debug.endRadius = radiusCP();
 		debug.endFrame = gameFrame();
 		debug.endPlayerId = finiteNumber(gmPlayer() && gmPlayer().id);
-		debug.ready = freshLevelReady();
+		debug.ready = freshLevelReady() && bootstrapped;
 		return debug;
 	}
 

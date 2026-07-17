@@ -19,6 +19,7 @@ export type Telemetry = {
 	playbackMode: boolean;
 	paused: boolean;
 	sim: boolean;
+	gameplayReady: boolean;
 	freeze?: {
 		physicsFrozen: boolean;
 		unfreezeStarted: boolean;
@@ -78,7 +79,7 @@ export type GameMessage =
 				frames: number;
 		  }
 	| { type: 'CAPTURE_CLEARED'; source: 'circloo-tas-game' }
-	| { type: 'ERROR'; source: 'circloo-tas-game'; message: string };
+	| { type: 'ERROR'; source: 'circloo-tas-game'; message: string; requestId?: number | null };
 
 export type BruteforceWorkerMessage =
 	| { type: 'BRUTEFORCE_READY'; source: 'circloo-tas-worker' }

@@ -60,7 +60,8 @@
 		captured: 0,
 		playbackMode: false,
 		paused: false,
-		sim: false
+		sim: false,
+		gameplayReady: false
 	});
 	let settings = $state<BruteforceSettings>({ ...defaultBruteforceSettings });
 	let bruteforce = $state({
@@ -164,7 +165,8 @@
 		const start = () => {
 			postToGame('RUN_REPLAY', {
 				requestId,
-				level: telemetry.level ?? 0,
+				level: telemetry.gameplayReady ? telemetry.level : null,
+				followCurrentLevel: !telemetry.gameplayReady,
 				seed: 0,
 				script
 			});
@@ -354,7 +356,10 @@
 				syncReplayFromEditor(scriptText, true);
 				break;
 			case 'RUN_READY':
-				if (message.requestId === replayRequestId) telemetry = message;
+				if (message.requestId === replayRequestId) {
+					telemetry = message;
+					setStatus('Deterministic run ready');
+				}
 				break;
 			case 'TELEMETRY':
 				telemetry = message;
@@ -367,7 +372,9 @@
 					showToast(`Run log saved (${message.frames} frames)`);
 					break;
 				case 'ERROR':
-					setError(message.message);
+					if (message.requestId == null || message.requestId === replayRequestId) {
+						setError(message.message);
+					}
 					break;
 		}
 	}

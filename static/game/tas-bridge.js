@@ -97,6 +97,7 @@
 		canonicalStage: 'idle',
 		runRequestSequence: 0
 	};
+	let canonicalRetryTimer = null;
 
 	W.__circlooTasBridge = state;
 
@@ -1560,6 +1561,7 @@
 			playbackMode: state.playbackMode,
 			paused: state.paused,
 			sim: IS_SIM,
+			gameplayReady: canonicalGameplayReady(),
 			freeze: freezeSnapshot()
 		};
 	}
@@ -1639,12 +1641,52 @@
 
 	function startLevelDirect(level) {
 		const targetLevel = Math.max(0, Math.floor(Number(level) || 0));
-		if (simRoomId() !== 5 || !simHasPhysicsWorld()) return false;
+		if (!canonicalGameplayEnvironmentReady()) return false;
 		if (!resetGameMakerRuntimeState(true)) return false;
 		callGlobal('if (typeof _X32 === "function") _X32(); return true;');
-		if (typeof W._c4 !== 'function') return false;
 		W._c4({}, {}, targetLevel);
 		return true;
+	}
+
+	function canonicalGameplayEnvironmentReady() {
+		return simRoomId() === 5 && simHasPhysicsWorld() && typeof W._c4 === 'function';
+	}
+
+	function currentGameplayLevel() {
+		const level = Number(gmLevel());
+		return Number.isFinite(level) && level > 0 ? Math.floor(level) : null;
+	}
+
+	function canonicalGameplayReady() {
+		return canonicalGameplayEnvironmentReady() && currentGameplayLevel() !== null;
+	}
+
+	function canonicalRunReady(run) {
+		return (
+			canonicalGameplayEnvironmentReady() &&
+			(!run.followCurrentLevel || currentGameplayLevel() !== null)
+		);
+	}
+
+	function clearCanonicalRetry() {
+		if (canonicalRetryTimer === null) return;
+		REAL.clearTimeout(canonicalRetryTimer);
+		canonicalRetryTimer = null;
+	}
+
+	function scheduleCanonicalRun(delay = 50) {
+		if (canonicalRetryTimer !== null) return;
+		canonicalRetryTimer = REAL.setTimeout(() => {
+			canonicalRetryTimer = null;
+			startNextCanonicalRun();
+		}, delay);
+	}
+
+	function deferCanonicalRunUntilGameplay(run) {
+		if (!state.pendingRun) state.pendingRun = run;
+		state.activeRun = null;
+		state.canonicalStage = 'waiting';
+		scheduleCanonicalRun();
 	}
 
 	function failCanonicalRun(message) {
@@ -1652,13 +1694,27 @@
 		state.activeRun = null;
 		state.canonicalStage = 'idle';
 		post('ERROR', { message, requestId });
-		REAL.setTimeout(startNextCanonicalRun, 0);
+		if (state.pendingRun) scheduleCanonicalRun(0);
 	}
 
 	function startNextCanonicalRun() {
 		if (state.activeRun || !state.pendingRun) return;
+		if (!canonicalRunReady(state.pendingRun)) {
+			state.canonicalStage = 'waiting';
+			scheduleCanonicalRun();
+			return;
+		}
+		clearCanonicalRetry();
 		state.activeRun = state.pendingRun;
 		state.pendingRun = null;
+		if (state.activeRun.followCurrentLevel) {
+			const currentLevel = currentGameplayLevel();
+			if (currentLevel === null) {
+				deferCanonicalRunUntilGameplay(state.activeRun);
+				return;
+			}
+			state.activeRun.level = currentLevel;
+		}
 		state.canonicalStage = 'warmup';
 		stopReplay();
 		resetRunLog('canonical-run-reset');
@@ -1672,7 +1728,8 @@
 		try {
 			const previousPlayer = gmPlayer();
 			if (!startLevelDirect(state.activeRun.level)) {
-				failCanonicalRun('Gameplay room is not ready for a deterministic run');
+				if (!canonicalGameplayEnvironmentReady()) deferCanonicalRunUntilGameplay(state.activeRun);
+				else failCanonicalRun('Unable to initialize the deterministic gameplay state');
 				return;
 			}
 			waitForCanonicalPlayer(state.activeRun, 'warmup', previousPlayer);
@@ -1689,7 +1746,8 @@
 		state.runRequestSequence = Math.max(state.runRequestSequence, requestId);
 		state.pendingRun = {
 			requestId,
-			level: Math.max(0, Math.floor(Number(options.level ?? gmLevel()) || 0)),
+			level: options.level == null ? null : Math.max(0, Math.floor(Number(options.level) || 0)),
+			followCurrentLevel: options.level == null || !!options.followCurrentLevel,
 			seed: Number.isFinite(Number(options.seed)) ? Math.trunc(Number(options.seed)) | 0 : DEFAULT_GAMEPLAY_SEED,
 			exact: !!options.exact,
 			script: normalized
@@ -1699,6 +1757,7 @@
 	}
 
 	function cancelCanonicalReplay() {
+		clearCanonicalRetry();
 		state.pendingRun = null;
 		state.activeRun = null;
 		state.canonicalStage = 'idle';
@@ -1707,6 +1766,10 @@
 
 	function waitForCanonicalPlayer(run, stage, previousPlayer, attempts = 0) {
 		if (!state.activeRun || state.activeRun.requestId !== run.requestId || state.canonicalStage !== stage) return;
+		if (!canonicalGameplayReady()) {
+			deferCanonicalRunUntilGameplay(run);
+			return;
+		}
 		const player = gmPlayer();
 		const ready =
 			gmLevel() === run.level &&
@@ -1744,7 +1807,8 @@
 				try {
 					const previousPlayer = gmPlayer();
 					if (!startLevelDirect(run.level)) {
-						failCanonicalRun('Unable to construct the canonical gameplay state');
+						if (!canonicalGameplayEnvironmentReady()) deferCanonicalRunUntilGameplay(run);
+						else failCanonicalRun('Unable to construct the canonical gameplay state');
 						return;
 					}
 					waitForCanonicalPlayer(run, 'final', previousPlayer);
@@ -1759,7 +1823,7 @@
 		if (state.pendingRun) {
 			state.activeRun = null;
 			state.canonicalStage = 'idle';
-			REAL.setTimeout(startNextCanonicalRun, 0);
+			scheduleCanonicalRun(0);
 			return;
 		}
 

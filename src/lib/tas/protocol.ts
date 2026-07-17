@@ -31,6 +31,7 @@ export type Telemetry = {
 
 export type BruteforceProgress = {
 	trials: number;
+	rate: number;
 	bestScore: number;
 	bestReached: boolean;
 	bestTimes: number[];
@@ -38,6 +39,9 @@ export type BruteforceProgress = {
 	lastScore: number;
 	lastReached: boolean;
 	improvements: number;
+	mode: string;
+	resumeFrame: number | null;
+	verified: number;
 	debug?: BruteforceDebug;
 	error?: string;
 };

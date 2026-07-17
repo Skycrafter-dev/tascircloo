@@ -26,6 +26,8 @@
 	let pendingTrial = null;
 	let running = false;
 	let current = null;
+	const PROGRESS_INTERVAL_MS = 50;
+	const BATCH_BUDGET_MS = 24;
 
 	const noop = function () {};
 
@@ -423,35 +425,56 @@
 		return Math.max(bounds.min, Math.min(bounds.max, Math.round(Number(frame)) || bounds.min));
 	}
 
-	function randomFrame(bounds) {
-		return bounds.min + Math.floor(Math.random() * (bounds.max - bounds.min + 1));
+	function randomFrame(bounds, random) {
+		return bounds.min + Math.floor(random() * (bounds.max - bounds.min + 1));
 	}
 
-	function addMutableInput(script, bounds, inputs) {
-		script.push({ frame: randomFrame(bounds), input: inputs[Math.floor(Math.random() * inputs.length)] });
+	function addMutableInput(script, bounds, inputs, random) {
+		script.push({ frame: randomFrame(bounds, random), input: inputs[Math.floor(random() * inputs.length)] });
 	}
 
-	function mutateScript(base, range, step, settings) {
+	function mutateScript(base, range, step, settings, random) {
 		const script = normalizeScript(base);
 		const inputs = ['.', 'L', 'R', 'LR'];
 		const bounds = mutationBounds(settings);
 		const indices = mutableIndices(script, bounds);
-		const op = Math.random();
+		const op = random();
 		if (op < 0.62 && indices.length) {
-			const i = indices[Math.floor(Math.random() * indices.length)];
-			const shift = (Math.floor(Math.random() * (range * 2 + 1)) - range) * step;
+			const i = indices[Math.floor(random() * indices.length)];
+			const shift = (Math.floor(random() * (range * 2 + 1)) - range) * step;
 			script[i] = { ...script[i], frame: clampMutationFrame(script[i].frame + shift, bounds) };
 		} else if (op < 0.82) {
-			addMutableInput(script, bounds, inputs);
+			addMutableInput(script, bounds, inputs, random);
 		} else if (op < 0.92 && indices.length) {
-			script.splice(indices[Math.floor(Math.random() * indices.length)], 1);
+			script.splice(indices[Math.floor(random() * indices.length)], 1);
 		} else if (indices.length) {
-			const i = indices[Math.floor(Math.random() * indices.length)];
-			script[i] = { ...script[i], input: inputs[Math.floor(Math.random() * inputs.length)] };
+			const i = indices[Math.floor(random() * indices.length)];
+			script[i] = { ...script[i], input: inputs[Math.floor(random() * inputs.length)] };
 		} else {
-			addMutableInput(script, bounds, inputs);
+			addMutableInput(script, bounds, inputs, random);
 		}
 		return normalizeScript(script);
+	}
+
+	function scriptSeed(script) {
+		let hash = 0x811c9dc5;
+		for (const entry of script) {
+			const text = `${entry.frame}:${entry.input};`;
+			for (let index = 0; index < text.length; index++) {
+				hash ^= text.charCodeAt(index);
+				hash = Math.imul(hash, 0x01000193);
+			}
+		}
+		return hash >>> 0 || 0x6d2b79f5;
+	}
+
+	function nextRandom() {
+		let value = current.rngState >>> 0;
+		value ^= value << 13;
+		value ^= value >>> 17;
+		value ^= value << 5;
+		current.rngState = value >>> 0;
+		return current.rngState / 0x100000000;
 	}
 
 	function postError(error) {
@@ -469,7 +492,8 @@
 			targetCP: current.settings.targetCP,
 			finishCP: current.settings.finishCP,
 			maxFrames: current.settings.maxFrames,
-			warmup: current.settings.warmup
+			warmup: current.settings.warmup,
+			seed: 0
 		};
 	}
 
@@ -478,52 +502,8 @@
 		return W.__circlooTasRunTrial(script, options);
 	}
 
-	function isolatedTrial(script, options) {
-		return new Promise((resolve, reject) => {
-			const child = new Worker(`/game/bruteforce-worker.js?sim=1&single=1&v=${encodeURIComponent(`${workerCacheBust}-${Date.now()}-${Math.random()}`)}`);
-			let done = false;
-			const timeout = realSetTimeout(() => {
-				if (done) return;
-				done = true;
-				child.terminate();
-				reject(new Error('Trial worker timed out'));
-			}, 30000);
-
-			child.onmessage = (event) => {
-				const message = event.data || {};
-				if (message.source !== 'circloo-tas-worker') return;
-				if (message.type === 'BRUTEFORCE_READY') {
-					child.postMessage({ source: 'circloo-tas-app', type: 'RUN_TRIAL', script, options });
-					return;
-				}
-				if (message.type === 'TRIAL_RESULT') {
-					if (done) return;
-					done = true;
-					realClearTimeout(timeout);
-					child.terminate();
-					resolve(message.result);
-					return;
-				}
-				if (message.type === 'BRUTEFORCE_ERROR') {
-					if (done) return;
-					done = true;
-					realClearTimeout(timeout);
-					child.terminate();
-					reject(new Error(message.error || 'Trial worker error'));
-				}
-			};
-			child.onerror = (event) => {
-				if (done) return;
-				done = true;
-				realClearTimeout(timeout);
-				child.terminate();
-				reject(new Error(event && event.message ? event.message : 'Trial worker error'));
-			};
-		});
-	}
-
 	function trial(script) {
-		return isolatedTrial(script, trialOptions());
+		return runLocalTrial(script, trialOptions());
 	}
 
 	function runTrialRequest(message) {
@@ -568,7 +548,11 @@
 		};
 	}
 
-	function postProgress(lastResult) {
+	function postProgress(lastResult, force = false) {
+		const now = realNow();
+		if (!force && now - current.lastProgressAt < PROGRESS_INTERVAL_MS) return;
+		current.lastProgressAt = now;
+		const elapsedSeconds = Math.max(0.001, (now - current.startedAt) / 1000);
 		W.postMessage({
 			source: 'circloo-tas-worker',
 			type: 'BRUTEFORCE_PROGRESS',
@@ -582,48 +566,78 @@
 			lastScript: current.lastScript,
 			lastDebug: lastResult.debug,
 			improvements: current.improvements,
-			debug: debugPayload()
+			debug: debugPayload(),
+			rate: current.trials / elapsedSeconds,
+			mode: current.optimizer ? 'level1-finish-resume' : 'full-runtime',
+			resumeFrame: current.optimizer ? current.optimizer.resumeFrame : null,
+			verified: current.verified
 		});
 	}
 
-	async function runOne() {
+	function runOne() {
+		if (!running || !current) return;
+		const workerStart = realNow();
+		const mutateStart = realNow();
+		const candidate = mutateScript(
+			current.best,
+			Math.max(0, current.settings.mutRange),
+			Math.max(1, current.settings.mutStep),
+			current.searchSettings,
+			nextRandom
+		);
+		const mutateMs = realNow() - mutateStart;
+		const trialStart = realNow();
+		let result = current.optimizer ? current.optimizer.evaluate(candidate) : trial(candidate);
+		const trialMs = realNow() - trialStart;
+		current.lastScript = candidate;
+		current.trials += 1;
+
+		if (result.reached && result.score < current.bestScore) {
+			const verified = trial(candidate);
+			current.verified += 1;
+			if (verified.reached && verified.score < current.bestScore) {
+				current.best = candidate;
+				current.bestScore = verified.score;
+				current.bestReached = true;
+				current.bestTimes = verified.times || [];
+				current.improvements += 1;
+				result = verified;
+			}
+		}
+
+		recordDebug({
+			workerMs: realNow() - workerStart,
+			mutateMs,
+			trialMs,
+			prepareMs: result.debug && result.debug.prepareMs,
+			pumpMs: result.debug && result.debug.pumpMs,
+			frames: result.debug && result.debug.frames,
+			prepPumps: result.debug && result.debug.prepPumps
+		});
+		if (current.maxTrials && current.trials >= current.maxTrials) {
+			postProgress(result, true);
+			running = false;
+			W.postMessage({ source: 'circloo-tas-worker', type: 'BRUTEFORCE_STOPPED' });
+			return;
+		}
+		postProgress(result);
+	}
+
+	function runBatch() {
 		if (!running || !current) return;
 		try {
-			const workerStart = realNow();
-			const mutateStart = realNow();
-			const candidate = mutateScript(current.best, Math.max(0, current.settings.mutRange), Math.max(1, current.settings.mutStep), current.settings);
-			const mutateMs = realNow() - mutateStart;
-			const trialStart = realNow();
-			const result = await trial(candidate);
-			if (!running || !current) return;
-			const trialMs = realNow() - trialStart;
-			current.lastScript = normalizeScript(candidate);
-			recordDebug({
-				workerMs: realNow() - workerStart,
-				mutateMs,
-				trialMs,
-				prepareMs: result.debug && result.debug.prepareMs,
-				pumpMs: result.debug && result.debug.pumpMs,
-				frames: result.debug && result.debug.frames,
-				prepPumps: result.debug && result.debug.prepPumps
-			});
-			current.trials += 1;
-			if (result.reached && result.score < current.bestScore) {
-				current.best = normalizeScript(candidate);
-				current.bestScore = result.score;
-				current.bestReached = result.reached;
-				current.bestTimes = result.times || [];
-				current.improvements += 1;
-			}
-			postProgress(result);
-			realSetTimeout(runOne, 0);
+			const deadline = realNow() + BATCH_BUDGET_MS;
+			do {
+				runOne();
+			} while (running && current && realNow() < deadline);
+			realSetTimeout(runBatch, 0);
 		} catch (error) {
 			running = false;
 			postError(error);
 		}
 	}
 
-	async function startBruteforce(message) {
+	function startBruteforce(message) {
 		if (!runtimeReady) {
 			pendingStart = message;
 			return;
@@ -631,9 +645,36 @@
 		try {
 			const base = normalizeScript(message.base || []);
 			const requestedLevel = Number(message.level);
+			const settings = message.settings || {};
+			const level = Number.isFinite(requestedLevel) ? Math.max(0, requestedLevel) : 1;
+			const options = {
+				level,
+				target: settings.target,
+				targetCP: settings.targetCP,
+				finishCP: settings.finishCP,
+				maxFrames: settings.maxFrames,
+				warmup: settings.warmup,
+				seed: 0
+			};
+			const optimizer =
+				typeof W.__circlooTasCreateFinishOptimizer === 'function'
+					? W.__circlooTasCreateFinishOptimizer(base, options)
+					: null;
+			const searchSettings = { ...settings };
+			if (optimizer) {
+				searchSettings.minFrame = Math.max(finiteFrame(settings.minFrame, 0), optimizer.resumeFrame);
+				const configuredMax = finiteFrame(settings.maxFrame, 0);
+				searchSettings.maxFrame = Math.max(
+					searchSettings.minFrame,
+					configuredMax > 0 ? configuredMax : finiteFrame(settings.maxFrames, optimizer.resumeFrame)
+				);
+			}
+
 			current = {
-				settings: message.settings || {},
-				level: Number.isFinite(requestedLevel) ? Math.max(0, requestedLevel) : 1,
+				settings,
+				searchSettings,
+				level,
+				optimizer,
 				best: base,
 				bestScore: Infinity,
 				bestReached: false,
@@ -642,12 +683,17 @@
 				improvements: 0,
 				debugLast: emptyDebugStats(),
 				debugTotals: emptyDebugStats(),
-				debugCount: 0
+				debugCount: 0,
+				rngState: scriptSeed(base),
+				verified: 0,
+				startedAt: realNow(),
+				lastProgressAt: 0,
+				maxTrials: Math.max(0, finiteFrame(message.maxTrials, 0))
 			};
 			running = true;
 			const workerStart = realNow();
 			const trialStart = realNow();
-			const result = await trial(base);
+			const result = trial(base);
 			if (!running || !current) return;
 			const trialMs = realNow() - trialStart;
 			current.lastScript = base;
@@ -661,13 +707,14 @@
 				prepPumps: result.debug && result.debug.prepPumps
 			});
 			current.trials = 1;
+			current.verified = 1;
 			if (result.reached) {
 				current.bestScore = result.score;
 				current.bestReached = true;
 				current.bestTimes = result.times || [];
 			}
-			postProgress(result);
-			realSetTimeout(runOne, 0);
+			postProgress(result, true);
+			realSetTimeout(runBatch, 0);
 		} catch (error) {
 			running = false;
 			postError(error);

@@ -2108,6 +2108,389 @@
 		return debug;
 	}
 
+	function isGameMakerInstance(value) {
+		return (
+			value &&
+			typeof value === 'object' &&
+			Number.isFinite(Number(value.id)) &&
+			Number.isFinite(Number(value._Ok)) &&
+			value._W41
+		);
+	}
+
+	function isExternalSimulationObject(value) {
+		if (!value || typeof value !== 'object') return false;
+		const name = String(value.constructor && value.constructor.name ? value.constructor.name : '');
+		return /^(Window|Document|HTML|Canvas|Audio|Image|Node|EventTarget)/.test(name);
+	}
+
+	// The fast finish search keeps an immutable Box2D checkpoint state and one
+	// reusable working graph. GameMaker instances are reduced to stable ID
+	// proxies because Box2D only needs their IDs for deterministic contact order.
+	function cloneSimulationGraph(root, options = {}) {
+		const map = new Map();
+		const pairs = [];
+
+		function clone(value) {
+			if (value === null || typeof value !== 'object') return value;
+			if (map.has(value)) return map.get(value);
+
+			if (options.proxyGameMakerInstances && isGameMakerInstance(value)) {
+				const proxy = Object.freeze({ id: Number(value.id), _Ok: Number(value._Ok) });
+				map.set(value, proxy);
+				return proxy;
+			}
+
+			if (isExternalSimulationObject(value)) return value;
+
+			let output;
+			if (Array.isArray(value)) output = new Array(value.length);
+			else if (value instanceof ArrayBuffer) output = value.slice(0);
+			else if (value instanceof DataView) {
+				const buffer = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
+				output = new DataView(buffer);
+			} else if (ArrayBuffer.isView(value)) output = new value.constructor(value);
+			else if (value instanceof Date) output = new Date(value.getTime());
+			else if (value instanceof Map) output = new Map();
+			else if (value instanceof Set) output = new Set();
+			else output = Object.create(Object.getPrototypeOf(value));
+
+			map.set(value, output);
+			pairs.push([value, output]);
+
+			if (value instanceof Map) {
+				for (const [key, item] of value) output.set(clone(key), clone(item));
+				return output;
+			}
+			if (value instanceof Set) {
+				for (const item of value) output.add(clone(item));
+				return output;
+			}
+
+			for (const key of Reflect.ownKeys(value)) {
+				const descriptor = Object.getOwnPropertyDescriptor(value, key);
+				if (!descriptor) continue;
+				if ('value' in descriptor) descriptor.value = clone(descriptor.value);
+				try {
+					Object.defineProperty(output, key, descriptor);
+				} catch {
+					try {
+						output[key] = descriptor.value;
+					} catch {}
+				}
+			}
+
+			return output;
+		}
+
+		return { root: clone(root), map, pairs };
+	}
+
+	function buildSimulationRestorer(workingGraph) {
+		const plans = [];
+
+		function workingValue(value) {
+			return value && typeof value === 'object' && workingGraph.map.has(value)
+				? workingGraph.map.get(value)
+				: value;
+		}
+
+		for (const [source, target] of workingGraph.pairs) {
+			if (source instanceof Map) {
+				plans.push({ type: 'map', source, target });
+				continue;
+			}
+			if (source instanceof Set) {
+				plans.push({ type: 'set', source, target });
+				continue;
+			}
+			if (source instanceof DataView) {
+				plans.push({ type: 'data-view', source, target });
+				continue;
+			}
+			if (ArrayBuffer.isView(source)) {
+				plans.push({ type: 'view', source, target });
+				continue;
+			}
+
+			const keys = [];
+			const values = [];
+			for (const key of Reflect.ownKeys(source)) {
+				if (Array.isArray(source) && key === 'length') continue;
+				const descriptor = Object.getOwnPropertyDescriptor(source, key);
+				if (!descriptor || !('value' in descriptor) || descriptor.writable === false) continue;
+				keys.push(key);
+				values.push(workingValue(descriptor.value));
+			}
+			plans.push({ type: Array.isArray(source) ? 'array' : 'object', source, target, keys, values });
+		}
+
+		return function restoreSimulationGraph() {
+			for (const plan of plans) {
+				if (plan.type === 'map') {
+					plan.target.clear();
+					for (const [key, value] of plan.source) {
+						plan.target.set(workingValue(key), workingValue(value));
+					}
+					continue;
+				}
+				if (plan.type === 'set') {
+					plan.target.clear();
+					for (const value of plan.source) plan.target.add(workingValue(value));
+					continue;
+				}
+				if (plan.type === 'view') {
+					plan.target.set(plan.source);
+					continue;
+				}
+				if (plan.type === 'data-view') {
+					new Uint8Array(plan.target.buffer, plan.target.byteOffset, plan.target.byteLength).set(
+						new Uint8Array(plan.source.buffer, plan.source.byteOffset, plan.source.byteLength)
+					);
+					continue;
+				}
+				if (plan.type === 'array') plan.target.length = plan.source.length;
+				for (let index = 0; index < plan.keys.length; index++) {
+					plan.target[plan.keys[index]] = plan.values[index];
+				}
+			}
+		};
+	}
+
+	function inputAtFrame(script, frame) {
+		let input = '.';
+		for (const entry of script) {
+			if (entry.input !== 'U' && entry.frame <= frame) input = entry.input;
+		}
+		return input;
+	}
+
+	function scriptPrefixKey(script, frame) {
+		return normalizeScript(script)
+			.filter((entry) => entry.input === 'U' || entry.frame < frame)
+			.map((entry) => `${entry.frame}:${entry.input}`)
+			.join('|');
+	}
+
+	function createLevelOneFinishOptimizer(script, options = {}) {
+		if (!IS_SIM) return null;
+		const level = Math.max(0, Math.floor(Number(options.level) || 0));
+		const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
+		if (level !== 1 || options.target !== 'finish' || finishCP !== 6) return null;
+
+		const normalized = normalizeScript(script);
+		const prefixCP = finishCP - 1;
+		const maxFrames = Math.max(1, Math.floor(Number(options.maxFrames) || 1));
+		const seed = Number.isFinite(Number(options.seed)) ? Math.trunc(Number(options.seed)) | 0 : DEFAULT_GAMEPLAY_SEED;
+		state.exactCheckpointMode = true;
+
+		try {
+			state.cpTimes = [];
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			const prepareDebug = prepareSimTrialLevel(level, seed);
+			if (!prepareDebug.ready) return null;
+
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			state.cpTimes = [];
+			armReplay(normalized);
+			resetFreeze(gmLevel());
+
+			let resumeFrame = null;
+			let resumeTarget = null;
+			for (let index = 0; index < maxFrames; index++) {
+				W.__circlooTasPumpFrame();
+				if (state.cpTimes[prefixCP] != null && resumeTarget === null) {
+					resumeTarget = state.cpTimes[prefixCP] + 10;
+				}
+				if (
+					resumeTarget !== null &&
+					gameFrame() >= resumeTarget &&
+					state.collectedCP >= prefixCP &&
+					radiusCP() >= prefixCP
+				) {
+					resumeFrame = gameFrame();
+					break;
+				}
+			}
+
+			if (resumeFrame === null || resumeFrame >= maxFrames) return null;
+			const wrapper = physicsWrapper();
+			const liveWorld = physicsWorld();
+			const livePlayer = gmPlayer();
+			const liveBody = livePlayer && livePlayer._Xd1 && livePlayer._Xd1._932;
+			if (!wrapper || !liveWorld || !liveBody) return null;
+
+			const circleData =
+				callGlobal(
+					[
+						'var out = [];',
+						'var object = typeof _Gx !== "undefined" && _Gx ? _Gx._qH(21) : null;',
+						'var list = object && object._Ln2 ? object._Ln2._OH : null;',
+						'if (!list) return out;',
+						'for (var i = 0; i < list.length; i++) {',
+						'  var circle = list[i];',
+						'  if (circle && !circle._qf && circle._rf && !(Number(circle._ye) > 0.5)) {',
+						'    out.push({ x: Number(circle.x), y: Number(circle.y) });',
+						'  }',
+						'}',
+						'return out;'
+					].join('\n')
+				) || [];
+			if (!circleData.length) return null;
+
+			const templateGraph = cloneSimulationGraph(liveWorld, { proxyGameMakerInstances: true });
+			const templateBody = templateGraph.map.get(liveBody);
+			if (!templateBody) return null;
+
+			// GameMaker's listener only copies contact data back to instances. The
+			// solver itself is unaffected, and prospective bests are fully replayed
+			// in the original runtime before they can be accepted.
+			const noContactListener = {
+				_6E1() {},
+				_7E1() {},
+				_8E1() {},
+				_aE1() {}
+			};
+			if (templateGraph.root._eC1) templateGraph.root._eC1._0F1 = noContactListener;
+
+			const workingGraph = cloneSimulationGraph(templateGraph.root);
+			const workingBody = workingGraph.map.get(templateBody);
+			if (!workingBody) return null;
+			const restore = buildSimulationRestorer(workingGraph);
+			const world = workingGraph.root;
+			const scale = Number(wrapper._sd1);
+			const stepRate = Number(wrapper._K62);
+			const iterations = Number(wrapper._L62);
+			const roomSpeed = Number(callGlobal('return typeof _Ux !== "undefined" && _Ux ? _Ux._AJ2 : null;'));
+			const inputScale = Number(livePlayer._Ot) || 1;
+			const extraInput = !!callGlobal('return !!(typeof global !== "undefined" && global && global._Fc);');
+			const collectRadius = 24 + (Number(livePlayer._jd) || 0);
+			if (![scale, stepRate, iterations, roomSpeed, collectRadius].every(Number.isFinite)) return null;
+
+			const prefixTimes = state.cpTimes.slice(0, prefixCP + 1);
+			const prefixKey = scriptPrefixKey(normalized, resumeFrame);
+			const initialInput = inputAtFrame(normalized, resumeFrame);
+			const velocityPrototype = Object.getPrototypeOf(workingBody._zC1());
+
+			function setHorizontalVelocity(value) {
+				const current = workingBody._zC1();
+				const velocity = Object.create(velocityPrototype);
+				velocity.x = value;
+				velocity.y = current.y;
+				workingBody._yC1(velocity);
+				workingBody._pd1(true);
+			}
+
+			function nudgeHorizontalVelocity(amount) {
+				const current = workingBody._zC1();
+				setHorizontalVelocity(((current.x / scale / roomSpeed) + amount) * scale * roomSpeed);
+			}
+
+			function applyInput(input) {
+				if (input.includes('L')) nudgeHorizontalVelocity(-0.52 * inputScale);
+				if (input.includes('R')) nudgeHorizontalVelocity(0.52 * inputScale);
+				if (extraInput && input.includes('L')) nudgeHorizontalVelocity(-0.01);
+				if (extraInput && input.includes('R')) nudgeHorizontalVelocity(0.01);
+			}
+
+			function evaluate(candidate) {
+				const candidateScript = normalizeScript(candidate);
+				if (scriptPrefixKey(candidateScript, resumeFrame) !== prefixKey) {
+					return { reached: false, score: Infinity, cp: prefixCP, times: prefixTimes.slice(), incompatiblePrefix: true };
+				}
+
+				const restoreStart = REAL.now();
+				restore();
+				const restoreMs = REAL.now() - restoreStart;
+				let frame = resumeFrame;
+				let input = initialInput;
+				let entryIndex = 0;
+				while (
+					entryIndex < candidateScript.length &&
+					(candidateScript[entryIndex].input === 'U' || candidateScript[entryIndex].frame < resumeFrame)
+				) {
+					entryIndex++;
+				}
+
+				const pumpStart = REAL.now();
+				while (frame < maxFrames) {
+					while (
+						entryIndex < candidateScript.length &&
+						candidateScript[entryIndex].frame <= frame
+					) {
+						if (candidateScript[entryIndex].input !== 'U') input = candidateScript[entryIndex].input;
+						entryIndex++;
+					}
+					applyInput(input);
+					frame++;
+
+					const position = workingBody._Rc1();
+					const playerX = position.x / scale;
+					const playerY = position.y / scale;
+					for (const circle of circleData) {
+						const dx = playerX - circle.x;
+						const dy = playerY - circle.y;
+						if (dx * dx + dy * dy < collectRadius * collectRadius) {
+							const times = prefixTimes.slice();
+							times[finishCP] = frame;
+							return {
+								reached: true,
+								score: frame,
+								cp: finishCP,
+								times,
+								debug: {
+									trialMs: restoreMs + (REAL.now() - pumpStart),
+									prepareMs: restoreMs,
+									pumpMs: REAL.now() - pumpStart,
+									frames: frame - resumeFrame,
+									prepPumps: 0,
+									resumeFrame,
+									fast: true
+								}
+							};
+						}
+					}
+
+					world._jF1(1 / stepRate, iterations, iterations);
+					world._nF1();
+				}
+
+				return {
+					reached: false,
+					score: Infinity,
+					cp: prefixCP,
+					times: prefixTimes.slice(),
+					debug: {
+						trialMs: restoreMs + (REAL.now() - pumpStart),
+						prepareMs: restoreMs,
+						pumpMs: REAL.now() - pumpStart,
+						frames: frame - resumeFrame,
+						prepPumps: 0,
+						resumeFrame,
+						fast: true
+					}
+				};
+			}
+
+			return {
+				level,
+				finishCP,
+				resumeFrame,
+				prefixTimes,
+				prefixKey,
+				evaluate,
+				prefixMatches(candidate) {
+					return scriptPrefixKey(candidate, resumeFrame) === prefixKey;
+				}
+			};
+		} finally {
+			stopReplay();
+			state.exactCheckpointMode = false;
+		}
+	}
+
 	function simTrial(script, options) {
 		state.exactCheckpointMode = true;
 		const trialStart = REAL.now();
@@ -2172,6 +2555,7 @@
 	}
 
 	W.__circlooTasRunTrial = simTrial;
+	W.__circlooTasCreateFinishOptimizer = createLevelOneFinishOptimizer;
 	W.__circlooTasPatchGameHooks = patchGameHooks;
 	W.__circlooTasRequestReplay = requestCanonicalReplay;
 

@@ -25,12 +25,12 @@
 	const settingsKey = 'circloo-tas:bruteforce-settings';
 	const defaultBruteforceSettings = {
 		level: 1,
-		target: 'cp',
+		target: 'finish',
 		targetCP: 1,
-		finishCP: 7,
-		maxFrames: 3600,
-		minFrame: 0,
-		maxFrame: 0,
+		finishCP: 6,
+		maxFrames: 520,
+		minFrame: 386,
+		maxFrame: 520,
 		mutRange: 8,
 		mutStep: 1,
 		warmup: 0,
@@ -73,6 +73,10 @@
 		trials: 0,
 		improvements: 0,
 		startedAt: 0,
+		rate: 0,
+		mode: '',
+		resumeFrame: null as number | null,
+		verified: 0,
 		debug: null as BruteforceDebug | null,
 		lastError: ''
 	});
@@ -98,9 +102,7 @@
 		})
 	);
 	const volumePercent = $derived(Math.round(volume * 100));
-	const bruteforceRate = $derived(
-		bruteforce.startedAt ? bruteforce.trials / Math.max(0.001, (performance.now() - bruteforce.startedAt) / 1000) : 0
-	);
+	const bruteforceRate = $derived(bruteforce.rate);
 
 	function debugMs(value: number | null | undefined) {
 		const n = Number(value);
@@ -241,7 +243,20 @@
 		try {
 			const raw = localStorage.getItem(settingsKey);
 			if (!raw) return;
-			settings = { ...settings, ...JSON.parse(raw) };
+			const saved = JSON.parse(raw) as Partial<BruteforceSettings>;
+			const isLegacyDefault =
+				saved.level === 1 &&
+				saved.target === 'cp' &&
+				saved.targetCP === 1 &&
+				saved.finishCP === 7 &&
+				saved.maxFrames === 3600 &&
+				saved.minFrame === 0 &&
+				saved.maxFrame === 0 &&
+				saved.mutRange === 8 &&
+				saved.mutStep === 1 &&
+				saved.warmup === 0 &&
+				saved.autoUseBest === false;
+			settings = isLegacyDefault ? { ...defaultBruteforceSettings } : { ...settings, ...saved };
 		} catch {
 			localStorage.removeItem(settingsKey);
 		}
@@ -277,6 +292,10 @@
 				bruteforce.lastScore = message.lastScore;
 				bruteforce.lastReached = message.lastReached;
 				bruteforce.improvements = message.improvements;
+				bruteforce.rate = message.rate;
+				bruteforce.mode = message.mode;
+				bruteforce.resumeFrame = message.resumeFrame;
+				bruteforce.verified = message.verified;
 				bruteforce.debug = message.debug ?? bruteforce.debug;
 				bruteforce.lastError = message.error ?? '';
 				if (hadImprovement) {
@@ -317,6 +336,10 @@
 		bruteforce.trials = 0;
 		bruteforce.improvements = 0;
 		bruteforce.startedAt = performance.now();
+		bruteforce.rate = 0;
+		bruteforce.mode = '';
+		bruteforce.resumeFrame = null;
+		bruteforce.verified = 0;
 		bruteforce.debug = null;
 		bruteforce.lastError = '';
 		setStatus('Starting bruteforce worker');
@@ -550,7 +573,7 @@
 					<label>
 						<span class="setting-label">
 							Min Frame
-							<span class="info-dot" aria-label="Lowest frame the bruteforce may modify." data-tip="Lowest script frame the bruteforce may add, move, delete, or change. Earlier inputs stay fixed.">
+							<span class="info-dot" aria-label="Lowest frame the bruteforce may modify." data-tip="Lowest script frame the bruteforce may add, move, delete, or change. Optimized Level 1 finish search keeps all inputs before its displayed resume frame fixed.">
 								<Info size={13} />
 							</span>
 						</span>
@@ -609,6 +632,13 @@
 					<span>{bruteforceRate.toFixed(1)}/s</span>
 					<span>best {gameTime(bruteforce.bestScore)}</span>
 					<span>{bruteforce.improvements} improvements</span>
+					<span>{bruteforce.verified} exact checks</span>
+					{#if bruteforce.mode}
+						<span>{bruteforce.mode === 'level1-finish-resume' ? 'single-worker resume' : 'full runtime'}</span>
+					{/if}
+					{#if bruteforce.resumeFrame != null}
+						<span>resume frame {bruteforce.resumeFrame}</span>
+					{/if}
 				</div>
 				{#if bruteforce.debug}
 					<div class="bruteforce-debug" aria-label="Bruteforce performance debug">

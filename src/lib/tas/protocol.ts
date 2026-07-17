@@ -58,6 +58,12 @@ export type BruteforceDebug = {
 
 export type GameMessage =
 	| ({ type: 'GAME_READY' | 'SIM_READY' | 'TELEMETRY'; source: 'circloo-tas-game' } & Telemetry)
+	| ({
+			type: 'RUN_READY';
+			source: 'circloo-tas-game';
+			requestId: number;
+			seed: number;
+	  } & Telemetry)
 		| {
 				type: 'SCRIPT_NORMALIZED' | 'CAPTURE_DUMP';
 				source: 'circloo-tas-game';

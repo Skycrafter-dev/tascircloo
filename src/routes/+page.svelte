@@ -46,6 +46,8 @@
 	let errorText = $state('');
 	let toastText = $state('');
 	let toastTimer: number | undefined;
+	let replayTimer: number | undefined;
+	let replayRequestId = 0;
 	let telemetry = $state<Telemetry>({
 		ready: false,
 		installed: false,
@@ -119,12 +121,7 @@
 	}
 
 	function handleGameLoad() {
-		for (const delay of [0, 150, 600]) {
-			window.setTimeout(() => {
-				postToGame('SET_VOLUME', { volume });
-				syncReplayFromEditor();
-			}, delay);
-		}
+		telemetry.ready = false;
 	}
 
 	async function fullscreenGame() {
@@ -153,14 +150,27 @@
 		}, 2200);
 	}
 
-	function syncReplayFromEditor(text = scriptText) {
+	function syncReplayFromEditor(text = scriptText, immediate = false) {
+		window.clearTimeout(replayTimer);
 		const script = normalizeScript(text);
 		const hasActiveInput = text.trim() && script.some((entry) => entry.input !== '.');
-		if (hasActiveInput) {
-			postToGame('ARM_REPLAY', { script });
-		} else {
+		if (!hasActiveInput) {
 			postToGame('STOP_REPLAY');
+			return;
 		}
+		if (!telemetry.ready) return;
+
+		const requestId = ++replayRequestId;
+		const start = () => {
+			postToGame('RUN_REPLAY', {
+				requestId,
+				level: telemetry.level ?? 0,
+				seed: 0,
+				script
+			});
+		};
+		if (immediate) start();
+		else replayTimer = window.setTimeout(start, 120);
 	}
 
 	function setScriptText(nextText: string) {
@@ -341,7 +351,10 @@
 			case 'GAME_READY':
 				telemetry = message;
 				postToGame('SET_VOLUME', { volume });
-				syncReplayFromEditor();
+				syncReplayFromEditor(scriptText, true);
+				break;
+			case 'RUN_READY':
+				if (message.requestId === replayRequestId) telemetry = message;
 				break;
 			case 'TELEMETRY':
 				telemetry = message;
@@ -362,11 +375,11 @@
 	onMount(() => {
 		loadSettings();
 		scriptText = localStorage.getItem(scriptKey) ?? defaultText;
-		syncReplayFromEditor(scriptText);
 		window.addEventListener('message', handleGameMessage);
 		return () => {
 			window.removeEventListener('message', handleGameMessage);
 			window.clearTimeout(toastTimer);
+			window.clearTimeout(replayTimer);
 			bruteforceWorker?.terminate();
 			bruteforceWorker = null;
 		};

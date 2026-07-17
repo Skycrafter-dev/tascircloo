@@ -7,6 +7,8 @@
 	const IS_SIM = PARAMS.get('sim') === '1';
 	const SIM_TOKEN = PARAMS.get('token') || '';
 	const FPS = 60;
+	const DEFAULT_GAMEPLAY_SEED = 0;
+	const RealDate = W.Date;
 	const realPerformanceNow =
 		W.performance && typeof W.performance.now === 'function' ? W.performance.now.bind(W.performance) : null;
 	const realDateNow = W.Date && typeof W.Date.now === 'function' ? W.Date.now.bind(W.Date) : () => Date.now();
@@ -44,6 +46,7 @@
 		playIndex: 0,
 		playLastFrame: -1,
 		playLevel: null,
+		inputLatchedFrame: null,
 		scriptUnfreezeConsumed: false,
 		physicsFrozen: true,
 		unfreezeStarted: false,
@@ -85,7 +88,14 @@
 		runLogLastLevel: null,
 		runLogDropped: 0,
 		runLogSequence: 0,
-		runLogLastKey: null
+		runLogLastKey: null,
+		clockInstalled: false,
+		clockBaseMs: 0,
+		clockTick: 0,
+		pendingRun: null,
+		activeRun: null,
+		canonicalStage: 'idle',
+		runRequestSequence: 0
 	};
 
 	W.__circlooTasBridge = state;
@@ -115,6 +125,67 @@
 		return '.';
 	}
 
+	function deterministicElapsedMs() {
+		return (state.clockTick * 1000) / FPS;
+	}
+
+	function deterministicDateNow() {
+		return state.clockBaseMs + deterministicElapsedMs();
+	}
+
+	function resetDeterministicClock() {
+		if (!state.clockInstalled) return;
+		const startupEpochMs = Number(
+			callGlobal('return typeof _zl1 !== "undefined" ? Number(_zl1) / 1000 : null;')
+		);
+		state.clockBaseMs = Number.isFinite(startupEpochMs) ? startupEpochMs + 1000 : realDateNow();
+		state.clockTick = 0;
+	}
+
+	function advanceDeterministicClock() {
+		state.clockTick++;
+		return deterministicElapsedMs();
+	}
+
+	function installDeterministicClock() {
+		if (IS_SIM || state.clockInstalled) return true;
+		const engineState = Number(callGlobal('return typeof _O83 !== "undefined" ? _O83 : null;'));
+		if (engineState !== 3) return false;
+
+		state.clockInstalled = true;
+		resetDeterministicClock();
+
+		try {
+			function DeterministicDate(...args) {
+				if (!new.target) return new RealDate(deterministicDateNow()).toString();
+				return args.length ? new RealDate(...args) : new RealDate(deterministicDateNow());
+			}
+			DeterministicDate.UTC = RealDate.UTC;
+			DeterministicDate.parse = RealDate.parse;
+			DeterministicDate.now = () => Math.floor(deterministicDateNow());
+			DeterministicDate.prototype = RealDate.prototype;
+			Object.setPrototypeOf(DeterministicDate, RealDate);
+			W.Date = DeterministicDate;
+		} catch {
+			state.clockInstalled = false;
+			return false;
+		}
+
+		try {
+			Object.defineProperty(W.performance, 'now', {
+				value: () => deterministicElapsedMs(),
+				configurable: true,
+				writable: true
+			});
+		} catch {}
+
+		W.__circlooTasClock = {
+			now: deterministicDateNow,
+			reset: resetDeterministicClock
+		};
+		return true;
+	}
+
 	function installFixedRaf() {
 		if (IS_SIM || W.__circlooTasFixedRaf) return;
 		W.__circlooTasFixedRaf = true;
@@ -126,7 +197,7 @@
 			const id = nextId++;
 			const timer = REAL.setTimeout(() => {
 				timers.delete(id);
-				callback(REAL.now());
+				callback(state.clockInstalled ? advanceDeterministicClock() : REAL.now());
 			}, 1000 / FPS);
 			timers.set(id, timer);
 			return id;
@@ -342,6 +413,18 @@
 			(typeof W._J3 === 'function' ||
 				typeof W._t4 === 'function' ||
 				typeof W._R4 === 'function')
+		);
+	}
+
+	function unlockAllLevels() {
+		return !!callGlobal(
+			[
+				'if (typeof global === "undefined" || !global) return false;',
+				'var maxLevel = Number(global._kc);',
+				'if (!Number.isFinite(maxLevel) || maxLevel <= 0) return false;',
+				'global._oc = maxLevel;',
+				'return true;'
+			].join('\n')
 		);
 	}
 
@@ -1007,6 +1090,7 @@
 		state.playIndex = 0;
 		state.playLastFrame = -1;
 		state.playLevel = level;
+		state.inputLatchedFrame = null;
 		state.scriptUnfreezeConsumed = false;
 		state.prevVirtual = { L: false, R: false };
 		state.virtual = { L: false, R: false };
@@ -1020,20 +1104,27 @@
 		if (!Number.isFinite(frame)) return;
 		maybeConsumeScriptUnfreeze();
 		if (!prestartReady()) {
-			setVirtualInput('.');
+			state.prevVirtual = { L: false, R: false };
+			state.virtual = { L: false, R: false };
+			state.inputLatchedFrame = null;
 			return;
 		}
 		if (state.playLastFrame >= 0 && frame < state.playLastFrame - 1) resetPlayback(level);
+		if (state.inputLatchedFrame === frame) return;
 
+		state.prevVirtual = { ...state.virtual };
+		let nextVirtual = { ...state.virtual };
 		state.playLastFrame = frame;
 		while (state.playIndex < state.script.length && state.script[state.playIndex].frame <= frame) {
 			if (state.script[state.playIndex].input === 'U') {
 				state.playIndex++;
 				continue;
 			}
-			setVirtualInput(state.script[state.playIndex].input);
+			nextVirtual = parseInput(state.script[state.playIndex].input);
 			state.playIndex++;
 		}
+		state.virtual = nextVirtual;
+		state.inputLatchedFrame = frame;
 	}
 
 	function isVirtualCode(code) {
@@ -1057,10 +1148,6 @@
 		return 0;
 	}
 
-	function overlayInput(nativeValue, virtualValue) {
-		return nativeValue > 0.5 || virtualValue > 0.5 ? 1 : 0;
-	}
-
 	function sameGameInstance(a, b) {
 		if (!a || !b) return false;
 		if (a === b) return true;
@@ -1070,9 +1157,7 @@
 	}
 
 	function shouldUseVirtualInput(self, code) {
-		if (!state.virtualEnabled || !state.playbackMode || state.paused || !isVirtualCode(code)) return false;
-		const player = gmPlayer();
-		return sameGameInstance(self, player) || sameGameInstance(this, player);
+		return state.virtualEnabled && state.playbackMode && !state.paused && isVirtualCode(code);
 	}
 
 	function shouldCaptureInput(self, code) {
@@ -1190,11 +1275,7 @@
 
 	function effectiveInput() {
 		if (!state.playbackMode) return state.consumedInput;
-		const held = liveHeld();
-		return inputOfHeld({
-			L: state.virtual.L || held.L,
-			R: state.virtual.R || held.R
-		});
+		return inputOfHeld(state.virtual);
 	}
 
 	function patchInput() {
@@ -1206,46 +1287,40 @@
 		if (inputCheckName) {
 			state.originalInputCheck = W[inputCheckName];
 			W[inputCheckName] = function patchedInputCheck(self, other, code) {
+				if (shouldUseVirtualInput.call(this, self, code)) return virtualCheck(code);
 				const nativeValue = state.originalInputCheck.apply(this, arguments);
 				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
-				const effectiveValue = shouldUseVirtualInput.call(this, self, code)
-					? overlayInput(gatedNativeValue, virtualCheck(code))
-					: gatedNativeValue;
-				captureInputCheck.call(this, self, code, effectiveValue);
-				return effectiveValue;
+				captureInputCheck.call(this, self, code, gatedNativeValue);
+				return gatedNativeValue;
 			};
 		}
 
 		if (inputPressedName) {
 			state.originalInputPressed = W[inputPressedName];
 			W[inputPressedName] = function patchedInputPressed(self, other, code) {
+				if (shouldUseVirtualInput.call(this, self, code)) return virtualPressed(code);
 				const nativeValue = state.originalInputPressed.apply(this, arguments);
-				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
-				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
-				return overlayInput(gatedNativeValue, virtualPressed(code));
+				return gatedNativeInput.call(this, self, code, nativeValue);
 			};
 		}
 
 		if (typeof W._R4 === 'function') {
 			state.originalPokiInputCheck = W._R4;
 			W._R4 = function patchedPokiInputCheck(self, other, code) {
+				if (shouldUseVirtualInput.call(this, self, code)) return virtualCheck(code);
 				const nativeValue = state.originalPokiInputCheck.apply(this, arguments);
 				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
-				const effectiveValue = shouldUseVirtualInput.call(this, self, code)
-					? overlayInput(gatedNativeValue, virtualCheck(code))
-					: gatedNativeValue;
-				captureInputCheck.call(this, self, code, effectiveValue);
-				return effectiveValue;
+				captureInputCheck.call(this, self, code, gatedNativeValue);
+				return gatedNativeValue;
 			};
 		}
 
 		if (typeof W._S4 === 'function') {
 			state.originalPokiInputPressed = W._S4;
 			W._S4 = function patchedPokiInputPressed(self, other, code) {
+				if (shouldUseVirtualInput.call(this, self, code)) return virtualPressed(code);
 				const nativeValue = state.originalPokiInputPressed.apply(this, arguments);
-				const gatedNativeValue = gatedNativeInput.call(this, self, code, nativeValue);
-				if (!shouldUseVirtualInput.call(this, self, code)) return gatedNativeValue;
-				return overlayInput(gatedNativeValue, virtualPressed(code));
+				return gatedNativeInput.call(this, self, code, nativeValue);
 			};
 		}
 
@@ -1497,6 +1572,7 @@
 		state.paused = false;
 		resetPlayback();
 		resetCapture({ preserve: false });
+		state.domHeld = { L: false, R: false };
 		setVirtualInput('.');
 		post('SCRIPT_NORMALIZED', {
 			script: state.script,
@@ -1509,38 +1585,202 @@
 		state.playbackMode = false;
 		state.paused = false;
 		resetPlayback();
+		state.domHeld = { L: false, R: false };
 		setVirtualInput('.');
 	}
 
 	function setPaused(paused) {
 		state.paused = !!paused;
+		state.inputLatchedFrame = null;
 		if (state.paused) setVirtualInput('.');
+	}
+
+	function seedGameplay(value = DEFAULT_GAMEPLAY_SEED) {
+		const seed = Number.isFinite(Number(value)) ? Math.trunc(Number(value)) | 0 : DEFAULT_GAMEPLAY_SEED;
+		const seeded = callGlobal(
+			'if (typeof _B91 === "function") { _B91(args[0] | 0); return true; } return false;',
+			seed
+		);
+		return seeded ? seed : null;
+	}
+
+	function resetGameMakerRuntimeState(resetAllocators) {
+		return !!callGlobal(
+			[
+				'if (typeof _Vm2 !== "undefined") _Vm2 = 0;',
+				'if (args[0]) {',
+				'  if (typeof _Oz2 !== "undefined") _Oz2 = 100000;',
+				'  if (typeof _Sz2 !== "undefined") _Sz2 = 10000000;',
+				'}',
+				'if (typeof _Ux !== "undefined" && _Ux && _Ux._P41 && _Ux._P41._OH) {',
+				'  for (var i = 0; i < _Ux._P41._OH.length; i++) {',
+				'    var instance = _Ux._P41._OH[i];',
+				'    if (instance) instance._Xm2 = 0;',
+				'  }',
+				'}',
+				'if (typeof _U83 !== "undefined") _U83 = 0;',
+				'if (typeof _mm2 !== "undefined") _mm2 = 60;',
+				'if (typeof _UT !== "undefined") _UT = 0;',
+				'if (typeof _S83 !== "undefined") _S83 = 0;',
+				'if (typeof _Z83 !== "undefined") _Z83 = 0;',
+				'if (typeof __83 !== "undefined") __83 = 0;',
+				'if (typeof _093 !== "undefined") _093 = 0;',
+				'if (typeof _Q83 !== "undefined" && typeof _GY === "function") {',
+				'  _Q83 = _R83 = _GY();',
+				'  _T83 = ~~(_Q83 / 1000000) + 4;',
+				'}',
+				'if (typeof _cd !== "undefined" && _cd) { _cd._bs = 60; _cd._hJ2 = 60; }',
+				'if (typeof _Xx !== "undefined" && _Xx && typeof _Xx._DY === "function") _Xx._DY();',
+				'return true;'
+			].join('\n'),
+			!!resetAllocators
+		);
+	}
+
+	function startLevelDirect(level) {
+		const targetLevel = Math.max(0, Math.floor(Number(level) || 0));
+		if (simRoomId() !== 5 || !simHasPhysicsWorld()) return false;
+		if (!resetGameMakerRuntimeState(true)) return false;
+		callGlobal('if (typeof _X32 === "function") _X32(); return true;');
+		if (typeof W._c4 !== 'function') return false;
+		W._c4({}, {}, targetLevel);
+		return true;
+	}
+
+	function failCanonicalRun(message) {
+		const requestId = state.activeRun && state.activeRun.requestId;
+		state.activeRun = null;
+		state.canonicalStage = 'idle';
+		post('ERROR', { message, requestId });
+		REAL.setTimeout(startNextCanonicalRun, 0);
+	}
+
+	function startNextCanonicalRun() {
+		if (state.activeRun || !state.pendingRun) return;
+		state.activeRun = state.pendingRun;
+		state.pendingRun = null;
+		state.canonicalStage = 'warmup';
+		stopReplay();
+		resetRunLog('canonical-run-reset');
+		resetCapture({ preserve: false });
+		clearRecoveredMemory();
+		if (seedGameplay(state.activeRun.seed) === null) {
+			failCanonicalRun('Unable to seed the GameMaker runtime');
+			return;
+		}
+		resetDeterministicClock();
+		try {
+			const previousPlayer = gmPlayer();
+			if (!startLevelDirect(state.activeRun.level)) {
+				failCanonicalRun('Gameplay room is not ready for a deterministic run');
+				return;
+			}
+			waitForCanonicalPlayer(state.activeRun, 'warmup', previousPlayer);
+		} catch (error) {
+			failCanonicalRun(String(error && error.message ? error.message : error));
+		}
+	}
+
+	function requestCanonicalReplay(script, options = {}) {
+		const normalized = normalizeScript(script, options);
+		const requestId = Number.isFinite(Number(options.requestId))
+			? Math.trunc(Number(options.requestId))
+			: ++state.runRequestSequence;
+		state.runRequestSequence = Math.max(state.runRequestSequence, requestId);
+		state.pendingRun = {
+			requestId,
+			level: Math.max(0, Math.floor(Number(options.level ?? gmLevel()) || 0)),
+			seed: Number.isFinite(Number(options.seed)) ? Math.trunc(Number(options.seed)) | 0 : DEFAULT_GAMEPLAY_SEED,
+			exact: !!options.exact,
+			script: normalized
+		};
+		startNextCanonicalRun();
+		return requestId;
+	}
+
+	function cancelCanonicalReplay() {
+		state.pendingRun = null;
+		state.activeRun = null;
+		state.canonicalStage = 'idle';
+		stopReplay();
+	}
+
+	function waitForCanonicalPlayer(run, stage, previousPlayer, attempts = 0) {
+		if (!state.activeRun || state.activeRun.requestId !== run.requestId || state.canonicalStage !== stage) return;
+		const player = gmPlayer();
+		const ready =
+			gmLevel() === run.level &&
+			!!player &&
+			(!previousPlayer || player !== previousPlayer) &&
+			radiusCP() === 0 &&
+			gameFrame() === 0;
+		if (ready) {
+			resetFreeze(run.level);
+			completeCanonicalStage(run, stage);
+			return;
+		}
+		if (attempts >= 5000) {
+			failCanonicalRun(`Timed out constructing deterministic ${stage} state`);
+			return;
+		}
+		REAL.setTimeout(() => waitForCanonicalPlayer(run, stage, previousPlayer, attempts + 1), 1);
+	}
+
+	function completeCanonicalStage(run, stage) {
+		if (!state.activeRun || state.activeRun.requestId !== run.requestId || state.canonicalStage !== stage) return;
+
+		if (stage === 'warmup') {
+			state.canonicalStage = 'between';
+			REAL.setTimeout(() => {
+				if (!state.activeRun || state.activeRun.requestId !== run.requestId || state.canonicalStage !== 'between') {
+					return;
+				}
+				state.canonicalStage = 'final';
+				if (seedGameplay(run.seed) === null) {
+					failCanonicalRun('Unable to reseed the GameMaker runtime');
+					return;
+				}
+				resetDeterministicClock();
+				try {
+					const previousPlayer = gmPlayer();
+					if (!startLevelDirect(run.level)) {
+						failCanonicalRun('Unable to construct the canonical gameplay state');
+						return;
+					}
+					waitForCanonicalPlayer(run, 'final', previousPlayer);
+				} catch (error) {
+					failCanonicalRun(String(error && error.message ? error.message : error));
+				}
+			}, 0);
+			return;
+		}
+
+		if (stage !== 'final') return;
+		if (state.pendingRun) {
+			state.activeRun = null;
+			state.canonicalStage = 'idle';
+			REAL.setTimeout(startNextCanonicalRun, 0);
+			return;
+		}
+
+		if (!resetGameMakerRuntimeState(false)) {
+			failCanonicalRun('Unable to canonicalize the tick-zero runtime state');
+			return;
+		}
+		armReplay(run.script, { exact: run.exact });
+		state.activeRun = null;
+		state.canonicalStage = 'running';
+		post('RUN_READY', {
+			requestId: run.requestId,
+			seed: run.seed,
+			...telemetry()
+		});
 	}
 
 	function tryStartLevel(level) {
 		resetRunLog('start-level');
-		const n = Math.max(0, Number(level) || 0);
 		ensureSimPlayRoom();
-		callGlobal('if (typeof _X32 === "function") _X32(); return true;');
-		try {
-			if (typeof W._c4 === 'function') {
-				W._c4({}, {}, n);
-				return true;
-			}
-		} catch {}
-		try {
-			if (typeof W._X4 === 'function') {
-				W._X4({}, {}, n);
-				return true;
-			}
-		} catch {}
-		try {
-			if (typeof W._05 === 'function') {
-				W._05({}, {}, n);
-				return true;
-			}
-		} catch {}
-		return false;
+		return startLevelDirect(level);
 	}
 
 	function installNoAudio() {
@@ -1687,9 +1927,11 @@
 		};
 	}
 
-	function prepareSimTrialLevel(level) {
+	function prepareSimTrialLevel(level, seed = DEFAULT_GAMEPLAY_SEED) {
 		const targetLevel = Math.max(0, Number(level) || 0);
-		const startPlayerId = finiteNumber(gmPlayer() && gmPlayer().id);
+		const startPlayer = gmPlayer();
+		const startPlayerId = finiteNumber(startPlayer && startPlayer.id);
+		let stageStartPlayer = startPlayer;
 		const debug = {
 			prepPumps: 0,
 			restartPumps: 0,
@@ -1704,11 +1946,10 @@
 
 		function freshLevelReady() {
 			const player = gmPlayer();
-			const playerId = finiteNumber(player && player.id);
 			return (
 				gmLevel() === targetLevel &&
 				!!player &&
-				(startPlayerId === null || playerId !== startPlayerId) &&
+				(!stageStartPlayer || player !== stageStartPlayer) &&
 				radiusCP() === 0 &&
 				gameFrame() === 0
 			);
@@ -1722,19 +1963,30 @@
 			state.unfreezeSource = 'sim-prep';
 		}
 
+		seedGameplay(seed);
 		tryStartLevel(targetLevel);
 		allowPrepPump();
 		for (let i = 0; i < 180 && !freshLevelReady(); i++) {
-			if (i > 0 && i % 30 === 0) tryStartLevel(targetLevel);
+			if (i > 0 && i % 30 === 0) {
+				stageStartPlayer = gmPlayer();
+				seedGameplay(seed);
+				tryStartLevel(targetLevel);
+			}
 			W.__circlooTasPumpFrame();
 			debug.prepPumps++;
 			allowPrepPump();
 		}
 
+		stageStartPlayer = gmPlayer();
+		seedGameplay(seed);
 		tryStartLevel(targetLevel);
 		allowPrepPump();
 		for (let i = 0; i < 180 && !freshLevelReady(); i++) {
-			if (i > 0 && i % 30 === 0) tryStartLevel(targetLevel);
+			if (i > 0 && i % 30 === 0) {
+				stageStartPlayer = gmPlayer();
+				seedGameplay(seed);
+				tryStartLevel(targetLevel);
+			}
 			W.__circlooTasPumpFrame();
 			debug.restartPumps++;
 			allowPrepPump();
@@ -1756,7 +2008,7 @@
 			state.collectedCP = 0;
 			state.lastCP = 0;
 			const prepareStart = REAL.now();
-			const prepareDebug = prepareSimTrialLevel(options.level);
+			const prepareDebug = prepareSimTrialLevel(options.level, options.seed);
 			const prepareMs = REAL.now() - prepareStart;
 			state.collectedCP = 0;
 			state.lastCP = 0;
@@ -1813,6 +2065,7 @@
 
 	W.__circlooTasRunTrial = simTrial;
 	W.__circlooTasPatchGameHooks = patchGameHooks;
+	W.__circlooTasRequestReplay = requestCanonicalReplay;
 
 	function monitorTick() {
 		state.wallFrame++;
@@ -1835,13 +2088,26 @@
 				post('SCRIPT_NORMALIZED', { script: state.script, text: serializeScript(state.script) });
 				break;
 			case 'ARM_REPLAY':
-				armReplay(message.script ?? message.text, { exact: !!message.exact });
+				requestCanonicalReplay(message.script ?? message.text, {
+					exact: !!message.exact,
+					level: message.level,
+					seed: message.seed,
+					requestId: message.requestId
+				});
+				break;
+			case 'RUN_REPLAY':
+				requestCanonicalReplay(message.script ?? message.text, {
+					exact: !!message.exact,
+					level: message.level,
+					seed: message.seed,
+					requestId: message.requestId
+				});
 				break;
 			case 'PAUSE_REPLAY':
 				setPaused(message.paused);
 				break;
 			case 'STOP_REPLAY':
-				stopReplay();
+				cancelCanonicalReplay();
 				break;
 			case 'CLEAR_CAPTURE':
 				resetCapture({ preserve: false });
@@ -1993,6 +2259,8 @@
 				if (typeof W.__circlooTasPumpFrame === 'function') W.__circlooTasPumpFrame();
 				return REAL.setTimeout(wait, 0);
 			}
+			if (!IS_SIM && !installDeterministicClock()) return REAL.setTimeout(wait, 0);
+			if (!IS_SIM && !unlockAllLevels()) return REAL.setTimeout(wait, 0);
 			patchGameHooks();
 			setVolume(state.volume);
 			post('GAME_READY', telemetry());

@@ -26,7 +26,7 @@
 	let pendingTrial = null;
 	let running = false;
 	let current = null;
-	const PROGRESS_INTERVAL_MS = 50;
+	const PROGRESS_INTERVAL_MS = 200;
 	const BATCH_BUDGET_MS = 24;
 
 	const noop = function () {};
@@ -468,6 +468,16 @@
 		return hash >>> 0 || 0x6d2b79f5;
 	}
 
+	function mixedWorkerSeed(seed, workerId) {
+		let value = (seed ^ Math.imul((Math.max(0, finiteFrame(workerId, 0)) + 1) >>> 0, 0x9e3779b1)) >>> 0;
+		value ^= value >>> 16;
+		value = Math.imul(value, 0x7feb352d);
+		value ^= value >>> 15;
+		value = Math.imul(value, 0x846ca68b);
+		value ^= value >>> 16;
+		return value >>> 0 || 0x6d2b79f5;
+	}
+
 	function nextRandom() {
 		let value = current.rngState >>> 0;
 		value ^= value << 13;
@@ -506,7 +516,98 @@
 		return runLocalTrial(script, trialOptions());
 	}
 
+	function scriptInputAtFrame(script, frame) {
+		let input = '.';
+		for (const entry of script) {
+			if (entry.input !== 'U' && entry.frame <= frame) input = entry.input;
+		}
+		return input;
+	}
 
+	function nextProbeInput(input) {
+		if (input === 'L') return 'R';
+		if (input === 'R') return 'L';
+		if (input === 'LR') return '.';
+		return 'R';
+	}
+
+	function validationCandidates(base, settings) {
+		const bounds = mutationBounds(settings);
+		const mutable = base
+			.map((entry, index) => ({ entry, index }))
+			.filter(({ entry }) => entry.input !== 'U' && entry.frame >= bounds.min && entry.frame <= bounds.max);
+		const selected = [];
+		if (mutable.length) {
+			selected.push(mutable[0]);
+			if (mutable.length > 1) selected.push(mutable[mutable.length - 1]);
+		}
+		const candidates = [];
+		for (let selectedIndex = 0; selectedIndex < selected.length; selectedIndex += 1) {
+			const { entry, index } = selected[selectedIndex];
+			const candidate = base.map((item) => ({ ...item }));
+			if (selectedIndex === 0 || entry.frame === 0) {
+				candidate[index].input = nextProbeInput(entry.input);
+			} else {
+				const step = Math.max(1, finiteFrame(settings && settings.mutStep, 1));
+				const forward = Math.min(bounds.max, entry.frame + step);
+				const backward = Math.max(bounds.min, entry.frame - step);
+				if (forward !== entry.frame) candidate[index].frame = forward;
+				else if (backward !== entry.frame) candidate[index].frame = backward;
+				else candidate[index].input = nextProbeInput(entry.input);
+			}
+			const normalized = normalizeScript(candidate);
+			if (JSON.stringify(normalized) !== JSON.stringify(base)) candidates.push(normalized);
+		}
+		if (!candidates.length) {
+			const frame = bounds.min;
+			const candidate = normalizeScript([
+				...base.map((entry) => ({ ...entry })),
+				{ frame, input: nextProbeInput(scriptInputAtFrame(base, frame)) }
+			]);
+			if (JSON.stringify(candidate) !== JSON.stringify(base)) candidates.push(candidate);
+		}
+		return candidates.slice(0, 2);
+	}
+
+	function comparableTrialResult(result) {
+		return {
+			reached: !!(result && result.reached),
+			score: Number(result && result.score),
+			cp: Number(result && result.cp),
+			times: Array.isArray(result && result.times) ? result.times.slice() : []
+		};
+	}
+
+	function determinismDigestText() {
+		if (typeof W.__circlooTasDeterminismDigest !== 'function') return null;
+		return JSON.stringify(W.__circlooTasDeterminismDigest());
+	}
+
+	function validateSearchOptimizer(optimizer, base, options, settings) {
+		if (!optimizer) return { optimizer: null, validated: false, reason: 'unavailable' };
+		for (const candidate of validationCandidates(base, settings)) {
+			const stateBacked = optimizer.stateBacked(candidate);
+			const fast = comparableTrialResult(optimizer.evaluate(candidate));
+			const fastDigest = stateBacked ? determinismDigestText() : null;
+			if (!optimizer.restoreVerifier()) {
+				return { optimizer: null, validated: false, reason: 'restore-failed' };
+			}
+			const exact = comparableTrialResult(runLocalTrial(candidate, options));
+			const resultMatches = JSON.stringify(fast) === JSON.stringify(exact);
+			const stateMatches = !stateBacked || (fastDigest !== null && fastDigest === determinismDigestText());
+			if (!resultMatches || !stateMatches) {
+				return {
+					optimizer: null,
+					validated: false,
+					reason: resultMatches ? 'state-mismatch' : 'score-mismatch'
+				};
+			}
+		}
+		if (!optimizer.rebuild(base)) {
+			return { optimizer: null, validated: false, reason: 'rebuild-failed' };
+		}
+		return { optimizer, validated: true, reason: '' };
+	}
 	function createSearchOptimizer(base, options, settings) {
 		const suffix =
 			typeof W.__circlooTasCreateAdaptiveFinishOptimizer === 'function'
@@ -530,6 +631,9 @@
 			},
 			get buildMs() {
 				return (suffix ? suffix.buildMs : 0) + (dynamic ? dynamic.buildMs : 0);
+			},
+			stateBacked(candidate) {
+				return !!dynamic && (!suffix || !suffix.prefixMatches(candidate));
 			},
 			evaluate(candidate) {
 				let result;
@@ -617,11 +721,14 @@
 			improvements: current.improvements,
 			debug: debugPayload(),
 			rate: current.trials / elapsedSeconds,
-			mode: current.optimizer ? 'level1-adaptive-rewind' : 'full-runtime',
+			mode: current.optimizer ? 'deterministic-rewind' : 'full-runtime',
 			rewindFrame: current.optimizer ? current.optimizer.rewindFrame : null,
 			snapshotCount: current.optimizer ? current.optimizer.snapshotCount : 0,
 			optimizerBuildMs: current.optimizer ? current.optimizer.buildMs : 0,
-			verified: current.verified
+			verified: current.verified,
+			workerId: current.workerId,
+			optimizerValidated: current.optimizerValidated,
+			optimizerFallbackReason: current.optimizerFallbackReason
 		});
 	}
 
@@ -650,8 +757,19 @@
 			const verified = trial(candidate);
 			current.verified += 1;
 			if (verified.reached && verified.score < current.bestScore) {
-				if (current.optimizer && !current.optimizer.rebuild(candidate)) {
-					throw new Error('Failed to rebuild deterministic rewind snapshots');
+				if (current.optimizer) {
+					if (!current.optimizer.rebuild(candidate)) {
+						throw new Error('Failed to rebuild deterministic rewind snapshots');
+					}
+					const optimizerCheck = validateSearchOptimizer(
+						current.optimizer,
+						candidate,
+						trialOptions(),
+						current.settings
+					);
+					current.optimizer = optimizerCheck.optimizer;
+					current.optimizerValidated = optimizerCheck.validated;
+					current.optimizerFallbackReason = optimizerCheck.reason;
 				}
 				current.best = candidate;
 				current.bestScore = verified.score;
@@ -716,14 +834,26 @@
 				maxFrame: settings.maxFrame,
 				snapshotStride: 32
 			};
-			const optimizer = createSearchOptimizer(base, options, settings);
+			const workerId = Math.max(0, finiteFrame(message.workerId, 0));
+			const startedAt = realNow();
+			const baseTrialStart = realNow();
+			const baseResult = runLocalTrial(base, options);
+			const baseTrialMs = realNow() - baseTrialStart;
+			const builtOptimizer = message.forceFullRuntime ? null : createSearchOptimizer(base, options, settings);
+			const optimizerCheck = message.forceFullRuntime
+				? { optimizer: null, validated: false, reason: 'pool-fallback' }
+				: validateSearchOptimizer(builtOptimizer, base, options, settings);
+			const optimizer = optimizerCheck.optimizer;
 			const searchSettings = { ...settings };
 
 			current = {
 				settings,
 				searchSettings,
 				level,
+				workerId,
 				optimizer,
+				optimizerValidated: optimizerCheck.validated,
+				optimizerFallbackReason: optimizerCheck.reason,
 				best: base,
 				bestScore: Infinity,
 				bestReached: false,
@@ -733,23 +863,21 @@
 				debugLast: emptyDebugStats(),
 				debugTotals: emptyDebugStats(),
 				debugCount: 0,
-				rngState: scriptSeed(base),
+				rngState: mixedWorkerSeed(scriptSeed(base), workerId),
 				verified: 0,
-				startedAt: realNow(),
+				startedAt,
 				lastProgressAt: 0,
 				maxTrials: Math.max(0, finiteFrame(message.maxTrials, 0))
 			};
 			running = true;
 			const workerStart = realNow();
-			const trialStart = realNow();
-			const result = trial(base);
+			const result = baseResult;
 			if (!running || !current) return;
-			const trialMs = realNow() - trialStart;
 			current.lastScript = base;
 			recordDebug({
 				workerMs: realNow() - workerStart,
 				mutateMs: 0,
-				trialMs,
+				trialMs: baseTrialMs,
 				prepareMs: result.debug && result.debug.prepareMs,
 				pumpMs: result.debug && result.debug.pumpMs,
 				frames: result.debug && result.debug.frames,

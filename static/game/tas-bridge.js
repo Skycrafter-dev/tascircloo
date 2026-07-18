@@ -113,7 +113,10 @@
 	W.__circlooTasShouldStepPhysics = () => shouldStepPhysics();
 	W.__circlooTasShouldFreezeRoomUpdate = () => shouldFreezeRoomUpdate();
 
+	const SIM_POST_TYPES = new Set(['BRIDGE_LOADED', 'GAME_READY', 'SIM_READY', 'ERROR']);
+
 	function post(type, payload = {}) {
+		if (IS_SIM && !SIM_POST_TYPES.has(type)) return;
 		if (W.parent && W.parent !== W) {
 			W.parent.postMessage({ source: 'circloo-tas-game', type, token: SIM_TOKEN, ...payload }, '*');
 		}
@@ -1003,6 +1006,176 @@
 		};
 	}
 
+	// This digest only decides whether rewind is safe. Accepted improvements are
+	// still verified by an independently rebuilt full runtime before use.
+	function normalizeDeterminismValue(value) {
+		if (typeof value === 'number') {
+			if (!Number.isFinite(value)) return value;
+			const normalized = Number(value.toPrecision(13));
+			return Object.is(normalized, -0) ? 0 : normalized;
+		}
+		if (Array.isArray(value)) return value.map(normalizeDeterminismValue);
+		if (value && typeof value === 'object') {
+			const normalized = {};
+			for (const key of Object.keys(value).sort()) normalized[key] = normalizeDeterminismValue(value[key]);
+			return normalized;
+		}
+		return value;
+	}
+
+	function determinismDigest() {
+		const physics = physicsSnapshot();
+		const bodyKeys = new Map();
+		for (const body of physics.bodies || []) {
+			const instanceId = finiteNumber(body.instance && body.instance.id);
+			bodyKeys.set(body.index, instanceId == null ? `body:${body.index}` : `instance:${instanceId}`);
+		}
+		const bodies = (physics.bodies || [])
+			.map((body) => ({
+				key: bodyKeys.get(body.index),
+				instance: body.instance
+					? {
+						id: body.instance.id,
+						objectIndex: body.instance.objectIndex,
+						x: body.instance.x,
+						y: body.instance.y,
+						physicsX: body.instance.physicsX,
+						physicsY: body.instance.physicsY
+					}
+					: null,
+				type: body.type,
+				flags: body.flags,
+				position: body.position,
+				angle: body.angle,
+				worldCenter: body.worldCenter,
+				localCenter: body.localCenter,
+				linearVelocity: body.linearVelocity,
+				angularVelocity: body.angularVelocity,
+				linearDamping: body.linearDamping,
+				angularDamping: body.angularDamping,
+				gravityScale: body.gravityScale,
+				mass: body.mass,
+				inertia: body.inertia,
+				invMass: body.invMass,
+				invI: body.invI,
+				force: body.force,
+				torque: body.torque,
+				sleepTime: body.sleepTime,
+				allowSleep: body.allowSleep,
+				awake: body.awake,
+				active: body.active,
+				bullet: body.bullet,
+				fixedRotation: body.fixedRotation,
+				sweep: body.sweep,
+				fixtures: body.fixtures.map((fixture) => ({
+					type: fixture.type,
+					density: fixture.density,
+					friction: fixture.friction,
+					restitution: fixture.restitution,
+					sensor: fixture.sensor,
+					filter: fixture.filter
+				}))
+			}))
+			.sort((left, right) => left.key.localeCompare(right.key));
+		const contacts = (physics.contacts || [])
+			.map((contact) => {
+				const pair = [bodyKeys.get(contact.bodyA) ?? null, bodyKeys.get(contact.bodyB) ?? null].sort();
+				return {
+					bodyA: pair[0],
+					bodyB: pair[1],
+					touching: contact.touching,
+					enabled: contact.enabled,
+					continuous: contact.continuous,
+					flags: contact.flags,
+					toi: contact.toi,
+					toiCount: contact.toiCount,
+					manifold: contact.manifold
+				};
+			})
+			.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+		const joints = (physics.joints || [])
+			.map((joint) => ({
+				type: joint.type,
+				bodyA: bodyKeys.get(joint.bodyA) ?? null,
+				bodyB: bodyKeys.get(joint.bodyB) ?? null,
+				anchorA: joint.anchorA,
+				anchorB: joint.anchorB,
+				collideConnected: joint.collideConnected
+			}))
+			.sort((left, right) => JSON.stringify(left).localeCompare(JSON.stringify(right)));
+		const player = gmPlayer();
+		const big = gmBig();
+		const rng =
+			callGlobal(
+				[
+					'var out = {};',
+					'try { out.seed = _A91; } catch (error) {}',
+					'try { out.index = _z91; } catch (error) {}',
+					'try { out.words = _y91.slice(0); } catch (error) {}',
+					'return out;'
+				].join('\n')
+			) || {};
+		return normalizeDeterminismValue({
+			level: gmLevel(),
+			frame: gameFrame(),
+			cp: state.collectedCP,
+			cpTimes: state.cpTimes.slice(),
+			player: player
+				? {
+					id: finiteNumber(player.id),
+					objectIndex: finiteNumber(player._Ok),
+					x: finiteNumber(player.x),
+					y: finiteNumber(player.y),
+					physicsX: finiteNumber(player._972),
+					physicsY: finiteNumber(player._a72),
+					frame: finiteNumber(player._hq),
+					radius: finiteNumber(player._jd)
+				}
+				: null,
+			big: big
+				? {
+					id: finiteNumber(big.id),
+					x: finiteNumber(big.x),
+					y: finiteNumber(big.y),
+					radius: finiteNumber(big._jd),
+					radiusStep: finiteNumber(big._nd),
+					maxRadius: finiteNumber(big._eq),
+					triggerCount: finiteNumber(big._dq),
+					expanding: !!big._en
+				}
+				: null,
+			rng,
+			physics: {
+				wrapper: physics.wrapper
+					? {
+						scale: physics.wrapper.scale,
+						stepRate: physics.wrapper.stepRate,
+						paused: physics.wrapper.paused,
+						velocityIterations: physics.wrapper.velocityIterations,
+						positionIterations: physics.wrapper.positionIterations,
+						contactsBuffered: physics.wrapper.contactsBuffered
+					}
+					: null,
+				world: physics.world
+					? {
+						bodyCount: physics.world.bodyCount,
+						jointCount: physics.world.jointCount,
+						allowSleep: physics.world.allowSleep,
+						warmStarting: physics.world.warmStarting,
+						continuousPhysics: physics.world.continuousPhysics,
+						subStepping: physics.world.subStepping,
+						flags: physics.world.flags,
+						gravity: physics.world.gravity,
+						proxyCount: physics.world.proxyCount
+					}
+					: null,
+				bodies,
+				contacts,
+				joints
+			}
+		});
+	}
+
 	function resetRunLog(reason = 'reset') {
 		state.runLog = [];
 		state.runLogStartedAt = Date.now();
@@ -1367,7 +1540,7 @@
 				state.collectedCP = Math.max(state.collectedCP, collectedCP);
 				state.lastCP = Math.max(state.lastCP, collectedCP);
 				state.cpTimes[collectedCP] = frame;
-				post('TELEMETRY', telemetry());
+				if (!IS_SIM) post('TELEMETRY', telemetry());
 			}
 
 			return result;
@@ -1382,8 +1555,10 @@
 		state.originalPlayerCreate = W._P8;
 		W._P8 = function patchedPlayerCreate(self, other) {
 			const result = state.originalPlayerCreate.apply(this, arguments);
-			beginFreshRun('player-create');
-			resetCapture({ preserve: false });
+			if (!IS_SIM) {
+				beginFreshRun('player-create');
+				resetCapture({ preserve: false });
+			}
 			return result;
 		};
 
@@ -1584,19 +1759,21 @@
 	}
 
 	function armReplay(script, options = {}) {
-		resetRunLog('replay-armed');
-		state.script = normalizeScript(script, options);
+		if (!IS_SIM) resetRunLog('replay-armed');
+		state.script = options.normalized ? script : normalizeScript(script, options);
 		state.virtualEnabled = true;
 		state.playbackMode = true;
 		state.paused = false;
 		resetPlayback();
-		resetCapture({ preserve: false });
+		if (!IS_SIM) resetCapture({ preserve: false });
 		state.domHeld = { L: false, R: false };
 		setVirtualInput('.');
-		post('SCRIPT_NORMALIZED', {
-			script: state.script,
-			text: options.exact ? serializeCapturedScript(state.script) : serializeScript(state.script)
-		});
+		if (!IS_SIM) {
+			post('SCRIPT_NORMALIZED', {
+				script: state.script,
+				text: options.exact ? serializeCapturedScript(state.script) : serializeScript(state.script)
+			});
+		}
 	}
 
 	function stopReplay() {
@@ -1874,7 +2051,7 @@
 	}
 
 	function tryStartLevel(level, allocatorBase = null) {
-		resetRunLog('start-level');
+		if (!IS_SIM) resetRunLog('start-level');
 		ensureSimPlayRoom();
 		return startLevelDirect(level, allocatorBase);
 	}
@@ -1943,20 +2120,40 @@
 	function installFastClock() {
 		let simTime = 0;
 		let nextId = 1;
+		let nextTimerTime = Infinity;
 		const timers = new Map();
 		const rafs = new Map();
 		const RealDate = W.Date;
+		const directStep = W.Function(
+			'try { if (typeof _O83 !== "undefined" && _O83 === 3 && typeof _d93 === "function") { _d93(); return true; } } catch (error) {} return false;'
+		);
+
+		function recomputeNextTimerTime() {
+			nextTimerTime = Infinity;
+			for (const timer of timers.values()) {
+				if (timer.time < nextTimerTime) nextTimerTime = timer.time;
+			}
+		}
 
 		function schedule(fn, delay, interval, args) {
 			const id = nextId++;
-			timers.set(id, { time: simTime + Math.max(0, Number(delay) || 0), interval, fn, args });
+			const timer = { time: simTime + Math.max(0, Number(delay) || 0), interval, fn, args };
+			timers.set(id, timer);
+			if (timer.time < nextTimerTime) nextTimerTime = timer.time;
 			return id;
+		}
+
+		function clearTimer(id) {
+			const timer = timers.get(id);
+			if (!timer) return;
+			timers.delete(id);
+			if (timer.time <= nextTimerTime) recomputeNextTimerTime();
 		}
 
 		W.setTimeout = (fn, delay, ...args) => schedule(fn, delay, 0, args);
 		W.setInterval = (fn, delay, ...args) => schedule(fn, delay, Math.max(1, Number(delay) || 1), args);
-		W.clearTimeout = (id) => timers.delete(id);
-		W.clearInterval = (id) => timers.delete(id);
+		W.clearTimeout = clearTimer;
+		W.clearInterval = clearTimer;
 		W.requestAnimationFrame = (callback) => {
 			const id = nextId++;
 			rafs.set(id, callback);
@@ -1977,6 +2174,7 @@
 			for (const [id, timer] of snapshot.timers || []) {
 				timers.set(id, { ...timer, args: Array.isArray(timer.args) ? timer.args.slice() : [] });
 			}
+			recomputeNextTimerTime();
 			rafs.clear();
 			for (const [id, callback] of snapshot.rafs || []) rafs.set(id, callback);
 			return true;
@@ -1998,33 +2196,30 @@
 
 		W.__circlooTasPumpFrame = () => {
 			simTime += 1000 / FPS;
-			let guard = 0;
-			while (guard++ < 20000) {
-				let dueId = null;
-				let due = null;
-				for (const [id, timer] of timers) {
-					if (timer.time <= simTime && (!due || timer.time < due.time)) {
-						dueId = id;
-						due = timer;
+			if (nextTimerTime <= simTime) {
+				let guard = 0;
+				while (guard++ < 20000 && nextTimerTime <= simTime) {
+					let dueId = null;
+					let due = null;
+					for (const [id, timer] of timers) {
+						if (timer.time <= simTime && (!due || timer.time < due.time || (timer.time === due.time && id < dueId))) {
+							dueId = id;
+							due = timer;
+						}
 					}
-				}
-				if (!due) break;
-				if (due.interval) due.time += due.interval;
-				else timers.delete(dueId);
-				try {
-					typeof due.fn === 'function' ? due.fn(...due.args) : W.eval(String(due.fn));
-				} catch (error) {
-					post('ERROR', { message: String(error && error.message ? error.message : error) });
+					if (!due) break;
+					if (due.interval) due.time += due.interval;
+					else timers.delete(dueId);
+					try {
+						typeof due.fn === 'function' ? due.fn(...due.args) : W.eval(String(due.fn));
+					} catch (error) {
+						post('ERROR', { message: String(error && error.message ? error.message : error) });
+					}
+					recomputeNextTimerTime();
 				}
 			}
-			if (IS_SIM) {
-				if (!W.__circlooTasDirectStep) {
-					W.__circlooTasDirectStep = W.Function(
-						'try { if (typeof _O83 !== "undefined" && _O83 === 3 && typeof _d93 === "function") { _d93(); return true; } } catch (error) {} return false;'
-					);
-				}
-				if (W.__circlooTasDirectStep()) return;
-			}
+			if (IS_SIM && directStep()) return;
+			if (!rafs.size) return;
 			const callbacks = [...rafs.values()];
 			rafs.clear();
 			for (const callback of callbacks) {
@@ -2142,14 +2337,15 @@
 		return /^(Window|Document|HTML|Canvas|Audio|Image|Node|EventTarget)/.test(name);
 	}
 
-	// The fast finish search keeps an immutable Box2D checkpoint state and one
-	// reusable working graph. GameMaker instances are reduced to stable ID
-	// proxies because Box2D only needs their IDs for deterministic contact order.
+	// Snapshot capture walks the GameMaker/Box2D graph iteratively. A compiled
+	// clone factory records the graph shape once, then creates a fresh isolated
+	// runtime graph for each candidate without repeating reflection.
 	function cloneSimulationGraph(root, options = {}) {
 		const map = new Map();
 		const pairs = [];
+		const pending = [];
 
-		function clone(value) {
+		function allocate(value) {
 			if (value === null || typeof value !== 'object') return value;
 			if (map.has(value)) return map.get(value);
 
@@ -2162,46 +2358,216 @@
 			if (isExternalSimulationObject(value)) return value;
 
 			let output;
+			let terminal = false;
 			if (Array.isArray(value)) output = new Array(value.length);
-			else if (value instanceof ArrayBuffer) output = value.slice(0);
+			else if (value instanceof ArrayBuffer) {
+				output = value.slice(0);
+				terminal = true;
+			}
 			else if (value instanceof DataView) {
 				const buffer = value.buffer.slice(value.byteOffset, value.byteOffset + value.byteLength);
 				output = new DataView(buffer);
-			} else if (ArrayBuffer.isView(value)) output = new value.constructor(value);
-			else if (value instanceof Date) output = new Date(value.getTime());
+				terminal = true;
+			} else if (ArrayBuffer.isView(value)) {
+				output = new value.constructor(value);
+				terminal = true;
+			} else if (value instanceof Date) {
+				output = new Date(value.getTime());
+				terminal = true;
+			}
 			else if (value instanceof Map) output = new Map();
 			else if (value instanceof Set) output = new Set();
 			else output = Object.create(Object.getPrototypeOf(value));
 
 			map.set(value, output);
 			pairs.push([value, output]);
-
-			if (value instanceof Map) {
-				for (const [key, item] of value) output.set(clone(key), clone(item));
-				return output;
-			}
-			if (value instanceof Set) {
-				for (const item of value) output.add(clone(item));
-				return output;
-			}
-
-			for (const key of Reflect.ownKeys(value)) {
-				const descriptor = Object.getOwnPropertyDescriptor(value, key);
-				if (!descriptor) continue;
-				if ('value' in descriptor) descriptor.value = clone(descriptor.value);
-				try {
-					Object.defineProperty(output, key, descriptor);
-				} catch {
-					try {
-						output[key] = descriptor.value;
-					} catch {}
-				}
-			}
-
+			if (!terminal) pending.push([value, output]);
 			return output;
 		}
 
-		return { root: clone(root), map, pairs };
+		const clonedRoot = allocate(root);
+		while (pending.length) {
+			const [source, target] = pending.pop();
+			if (source instanceof Map) {
+				for (const [key, item] of source) target.set(allocate(key), allocate(item));
+				continue;
+			}
+			if (source instanceof Set) {
+				for (const item of source) target.add(allocate(item));
+				continue;
+			}
+			for (const key of Reflect.ownKeys(source)) {
+				if (Array.isArray(source) && key === 'length') continue;
+				const descriptor = Object.getOwnPropertyDescriptor(source, key);
+				if (!descriptor) continue;
+				if ('value' in descriptor) descriptor.value = allocate(descriptor.value);
+				try {
+					Object.defineProperty(target, key, descriptor);
+				} catch {
+					try {
+						target[key] = descriptor.value;
+					} catch {}
+				}
+			}
+		}
+
+		return { root: clonedRoot, map, pairs };
+	}
+
+	function buildSimulationCloneFactory(root, options = {}) {
+		const nodeIndices = new Map();
+		const inlineValues = new Map();
+		const nodes = [];
+		const pending = [];
+
+		function encoded(value) {
+			if (value === null || typeof value !== 'object') return { value };
+			if (nodeIndices.has(value)) return { ref: nodeIndices.get(value) };
+			if (inlineValues.has(value)) return { value: inlineValues.get(value) };
+
+			if (options.proxyGameMakerInstances && isGameMakerInstance(value)) {
+				const proxy = Object.freeze({ id: Number(value.id), _Ok: Number(value._Ok) });
+				inlineValues.set(value, proxy);
+				return { value: proxy };
+			}
+			if (isExternalSimulationObject(value)) return { value };
+
+			const index = nodes.length;
+			nodeIndices.set(value, index);
+			nodes.push(null);
+
+			let type = 'object';
+			if (Array.isArray(value)) type = 'array';
+			else if (value instanceof ArrayBuffer) type = 'array-buffer';
+			else if (value instanceof DataView) type = 'data-view';
+			else if (ArrayBuffer.isView(value)) type = 'typed-array';
+			else if (value instanceof Date) type = 'date';
+			else if (value instanceof Map) type = 'map';
+			else if (value instanceof Set) type = 'set';
+
+			const spec = {
+				type,
+				source: value,
+				prototype: Object.getPrototypeOf(value),
+				length: Array.isArray(value) ? value.length : 0,
+				properties: [],
+				entries: []
+			};
+			nodes[index] = spec;
+			pending.push({ source: value, spec });
+
+			return { ref: index };
+		}
+
+		const encodedRoot = encoded(root);
+		while (pending.length) {
+			const { source, spec } = pending.pop();
+			if (spec.type === 'map') {
+				for (const [key, item] of source) spec.entries.push([encoded(key), encoded(item)]);
+			} else if (spec.type === 'set') {
+				for (const item of source) spec.entries.push(encoded(item));
+			}
+
+			const typedLength = ArrayBuffer.isView(source) && !(source instanceof DataView) ? source.length : -1;
+			for (const key of Reflect.ownKeys(source)) {
+				if (spec.type === 'array' && key === 'length') continue;
+				if (
+					spec.type === 'typed-array' &&
+					typeof key === 'string' &&
+					/^\d+$/.test(key) &&
+					Number(key) < typedLength
+				) {
+					continue;
+				}
+				const descriptor = Object.getOwnPropertyDescriptor(source, key);
+				if (!descriptor) continue;
+				const data = 'value' in descriptor;
+				spec.properties.push({
+					key,
+					data,
+					encoded: data ? encoded(descriptor.value) : null,
+					descriptor,
+					fast:
+						data &&
+						descriptor.writable === true &&
+						descriptor.enumerable === true &&
+						descriptor.configurable === true
+				});
+			}
+		}
+
+		function resolved(token, outputs) {
+			return Object.prototype.hasOwnProperty.call(token, 'ref') ? outputs[token.ref] : token.value;
+		}
+
+		return function cloneCompiledSimulationGraph() {
+			const outputs = new Array(nodes.length);
+			for (let index = 0; index < nodes.length; index++) {
+				const spec = nodes[index];
+				switch (spec.type) {
+					case 'array':
+						outputs[index] = new Array(spec.length);
+						break;
+					case 'array-buffer':
+						outputs[index] = spec.source.slice(0);
+						break;
+					case 'data-view': {
+						const buffer = spec.source.buffer.slice(
+							spec.source.byteOffset,
+							spec.source.byteOffset + spec.source.byteLength
+						);
+						outputs[index] = new DataView(buffer);
+						break;
+					}
+					case 'typed-array':
+						outputs[index] = new spec.source.constructor(spec.source);
+						break;
+					case 'date':
+						outputs[index] = new Date(spec.source.getTime());
+						break;
+					case 'map':
+						outputs[index] = new Map();
+						break;
+					case 'set':
+						outputs[index] = new Set();
+						break;
+					default:
+						outputs[index] = Object.create(spec.prototype);
+				}
+			}
+
+			for (let index = 0; index < nodes.length; index++) {
+				const spec = nodes[index];
+				const output = outputs[index];
+				if (spec.type === 'map') {
+					for (const [key, item] of spec.entries) output.set(resolved(key, outputs), resolved(item, outputs));
+				} else if (spec.type === 'set') {
+					for (const item of spec.entries) output.add(resolved(item, outputs));
+				}
+
+				for (const property of spec.properties) {
+					if (property.fast) {
+						try {
+							output[property.key] = resolved(property.encoded, outputs);
+							continue;
+						} catch {}
+					}
+					const descriptor = { ...property.descriptor };
+					if (property.data) descriptor.value = resolved(property.encoded, outputs);
+					try {
+						Object.defineProperty(output, property.key, descriptor);
+					} catch {
+						if (property.data) {
+							try {
+								output[property.key] = descriptor.value;
+							} catch {}
+						}
+					}
+				}
+			}
+
+			return resolved(encodedRoot, outputs);
+		};
 	}
 
 	function buildSimulationRestorer(workingGraph) {
@@ -2366,8 +2732,8 @@
 		};
 	}
 
-	function restoreReplaySimulationState(snapshot, script, frame) {
-		const normalized = normalizeScript(script);
+	function restoreReplaySimulationState(snapshot, script, frame, alreadyNormalized = false) {
+		const normalized = alreadyNormalized ? script : normalizeScript(script);
 		state.script = normalized;
 		state.virtualEnabled = true;
 		state.playbackMode = true;
@@ -2410,22 +2776,33 @@
 		}
 	}
 
-	function earliestInputDifference(leftScript, rightScript) {
-		const left = normalizeScript(leftScript).filter((entry) => entry.input !== 'U');
-		const right = normalizeScript(rightScript).filter((entry) => entry.input !== 'U');
-		const frames = [...new Set([...left.map((entry) => entry.frame), ...right.map((entry) => entry.frame)])].sort(
-			(a, b) => a - b
-		);
+	function earliestNormalizedInputDifference(left, right) {
 		let leftIndex = 0;
 		let rightIndex = 0;
 		let leftInput = '.';
 		let rightInput = '.';
-		for (const frame of frames) {
-			while (leftIndex < left.length && left[leftIndex].frame <= frame) leftInput = left[leftIndex++].input;
-			while (rightIndex < right.length && right[rightIndex].frame <= frame) rightInput = right[rightIndex++].input;
+		while (leftIndex < left.length || rightIndex < right.length) {
+			while (leftIndex < left.length && left[leftIndex].input === 'U') leftIndex++;
+			while (rightIndex < right.length && right[rightIndex].input === 'U') rightIndex++;
+			const leftFrame = leftIndex < left.length ? left[leftIndex].frame : Infinity;
+			const rightFrame = rightIndex < right.length ? right[rightIndex].frame : Infinity;
+			const frame = Math.min(leftFrame, rightFrame);
+			if (!Number.isFinite(frame)) break;
+			while (leftIndex < left.length && left[leftIndex].frame <= frame) {
+				if (left[leftIndex].input !== 'U') leftInput = left[leftIndex].input;
+				leftIndex++;
+			}
+			while (rightIndex < right.length && right[rightIndex].frame <= frame) {
+				if (right[rightIndex].input !== 'U') rightInput = right[rightIndex].input;
+				rightIndex++;
+			}
 			if (leftInput !== rightInput) return frame;
 		}
 		return Infinity;
+	}
+
+	function earliestInputDifference(leftScript, rightScript) {
+		return earliestNormalizedInputDifference(normalizeScript(leftScript), normalizeScript(rightScript));
 	}
 
 	function inputAtFrame(script, frame) {
@@ -2982,11 +3359,13 @@
 		};
 	}
 
-	function createLevelOneDynamicFinishOptimizer(script, options = {}) {
+	function createDynamicTargetOptimizer(script, options = {}) {
 		if (!IS_SIM) return null;
 		const level = Math.max(0, Math.floor(Number(options.level) || 0));
+		const target = options.target === 'cp' ? 'cp' : options.target === 'finish' ? 'finish' : null;
+		const targetCP = Math.max(1, Math.floor(Number(options.targetCP) || 1));
 		const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
-		if (level !== 1 || options.target !== 'finish' || finishCP !== 6) return null;
+		if (level < 1 || level > 20 || !target) return null;
 
 		const maxFrames = Math.max(1, Math.floor(Number(options.maxFrames) || 1));
 		const minFrame = Math.max(0, Math.floor(Number(options.minFrame) || 0));
@@ -3004,6 +3383,16 @@
 		let verifierRoot = null;
 		let verifierScalars = null;
 		let verifierClock = null;
+
+		function targetReached() {
+			return target === 'cp'
+				? state.collectedCP >= targetCP && state.cpTimes[targetCP] != null
+				: state.collectedCP >= finishCP;
+		}
+
+		function targetScore() {
+			return target === 'cp' ? Number(state.cpTimes[targetCP]) : gameFrame();
+		}
 
 		function runtimeRoot() {
 			return callGlobal(
@@ -3026,6 +3415,7 @@
 			return {
 				frame,
 				templateRoot: templateGraph.root,
+				cloneRuntimeRoot: buildSimulationCloneFactory(templateGraph.root, { proxyGameMakerInstances: false }),
 				scalars: captureRuntimeScalars(),
 				replay: captureReplaySimulationState(),
 				clock:
@@ -3052,6 +3442,7 @@
 			const started = REAL.now();
 			baseScript = normalizeScript(nextBaseScript);
 			const wantedFrames = snapshotFramesFor(baseScript);
+			const capturedFrames = new Set();
 			const nextSnapshots = [];
 			state.exactCheckpointMode = true;
 			try {
@@ -3064,17 +3455,20 @@
 				state.cpTimes = [];
 				state.collectedCP = 0;
 				state.lastCP = 0;
-				armReplay(baseScript);
+				armReplay(baseScript, { normalized: true });
 				resetFreeze(gmLevel());
 				let reached = false;
 				let score = Infinity;
 				for (let index = 0; index < maxFrames; index++) {
 					const frame = gameFrame();
-					if (wantedFrames.has(frame)) nextSnapshots.push(captureSnapshot(frame));
+					if (wantedFrames.has(frame) && !capturedFrames.has(frame)) {
+						capturedFrames.add(frame);
+						nextSnapshots.push(captureSnapshot(frame));
+					}
 					W.__circlooTasPumpFrame();
-					if (!reached && state.collectedCP >= finishCP) {
+					if (!reached && targetReached()) {
 						reached = true;
-						score = gameFrame();
+						score = targetScore();
 						break;
 					}
 				}
@@ -3122,7 +3516,7 @@
 
 		function evaluate(candidate) {
 			const candidateScript = normalizeScript(candidate);
-			const differenceFrame = earliestInputDifference(baseScript, candidateScript);
+			const differenceFrame = earliestNormalizedInputDifference(baseScript, candidateScript);
 			if (!Number.isFinite(differenceFrame)) {
 				lastRewindFrame = baseResult && Number.isFinite(baseResult.score) ? baseResult.score : 0;
 				return {
@@ -3132,20 +3526,20 @@
 				};
 			}
 
-			const restored = restoreCandidate(candidateScript, differenceFrame);
+			const restored = restoreCandidate(candidateScript, differenceFrame, true);
 			const snapshot = restored.snapshot;
 			const restoreMs = restored.restoreMs;
 			const pumpStart = REAL.now();
 			let frames = 0;
-			let reached = state.collectedCP >= finishCP;
-			let score = reached ? gameFrame() : Infinity;
+			let reached = targetReached();
+			let score = reached ? targetScore() : Infinity;
 			const maxPumps = Math.max(0, maxFrames - snapshot.frame);
 			while (!reached && frames < maxPumps) {
 				W.__circlooTasPumpFrame();
 				frames++;
-				if (state.collectedCP >= finishCP) {
+				if (targetReached()) {
 					reached = true;
-					score = gameFrame();
+					score = targetScore();
 				}
 			}
 			const pumpMs = REAL.now() - pumpStart;
@@ -3167,18 +3561,22 @@
 			};
 		}
 
-		function restoreCandidate(candidateScript, differenceFrame = earliestInputDifference(baseScript, candidateScript)) {
-			const normalizedCandidate = normalizeScript(candidateScript);
+		function restoreCandidate(
+			candidateScript,
+			differenceFrame = earliestNormalizedInputDifference(baseScript, candidateScript),
+			alreadyNormalized = false
+		) {
+			const normalizedCandidate = alreadyNormalized ? candidateScript : normalizeScript(candidateScript);
 			const snapshot = chooseSnapshot(Number.isFinite(differenceFrame) ? differenceFrame : 0);
 			lastRewindFrame = snapshot.frame;
 			const restoreStart = REAL.now();
-			const workingGraph = cloneSimulationGraph(snapshot.templateRoot, { proxyGameMakerInstances: false });
-			installRuntimeRoot(workingGraph.root);
+			const workingRoot = snapshot.cloneRuntimeRoot();
+			installRuntimeRoot(workingRoot);
 			restoreRuntimeScalars(snapshot.scalars);
 			if (snapshot.clock && typeof W.__circlooTasRestoreFastClock === 'function') {
 				W.__circlooTasRestoreFastClock(snapshot.clock);
 			}
-			restoreReplaySimulationState(snapshot.replay, normalizedCandidate, snapshot.frame);
+			restoreReplaySimulationState(snapshot.replay, normalizedCandidate, snapshot.frame, true);
 			return {
 				snapshot,
 				restoreMs: REAL.now() - restoreStart,
@@ -3205,6 +3603,8 @@
 		if (!rebuild(baseScript)) return null;
 		return {
 			level,
+			target,
+			targetCP,
 			finishCP,
 			get resumeFrame() {
 				return lastRewindFrame;
@@ -3238,7 +3638,7 @@
 			state.collectedCP = 0;
 			state.lastCP = 0;
 			state.cpTimes = [];
-			armReplay(script);
+			armReplay(script, { normalized: true });
 			resetFreeze(gmLevel());
 
 			const targetCP = Math.max(1, Math.floor(Number(options.targetCP) || 1));
@@ -3289,9 +3689,10 @@
 	}
 
 	W.__circlooTasRunTrial = simTrial;
+	W.__circlooTasDeterminismDigest = determinismDigest;
 	W.__circlooTasCreateFinishOptimizer = createLevelOneFinishOptimizer;
 	W.__circlooTasCreateAdaptiveFinishOptimizer = createLevelOneAdaptiveFinishOptimizer;
-	W.__circlooTasCreateDynamicFinishOptimizer = createLevelOneDynamicFinishOptimizer;
+	W.__circlooTasCreateDynamicFinishOptimizer = createDynamicTargetOptimizer;
 	W.__circlooTasPatchGameHooks = patchGameHooks;
 	W.__circlooTasRequestReplay = requestCanonicalReplay;
 
@@ -3477,8 +3878,10 @@
 		installFixedRaf();
 		post('BRIDGE_LOADED', { sim: IS_SIM });
 		W.addEventListener('message', handleMessage, true);
-		installDomInputCapture();
-		resetCapture({ preserve: false });
+		if (!IS_SIM) {
+			installDomInputCapture();
+			resetCapture({ preserve: false });
+		}
 
 		const wait = () => {
 			if (!gameReady()) return REAL.setTimeout(wait, 50);

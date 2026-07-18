@@ -13,6 +13,8 @@
 	import {
 		appMessage,
 		type BruteforceDebug,
+		type BruteforceDebugStats,
+		type BruteforceProgress,
 		type BruteforceSettings,
 		type BruteforceWorkerMessage,
 		type GameMessage,
@@ -37,9 +39,23 @@
 		autoUseBest: false
 	} satisfies BruteforceSettings;
 
+	type BruteforceWorkerSlot = {
+		id: number;
+		worker: Worker;
+		ready: boolean;
+		stopped: boolean;
+		progress: BruteforceProgress | null;
+	};
+
 	let iframeEl = $state<HTMLIFrameElement | null>(null);
 	let gameShellEl = $state<HTMLDivElement | null>(null);
-	let bruteforceWorker: Worker | null = null;
+	let bruteforceWorkers: BruteforceWorkerSlot[] = [];
+	let nextBruteforceWorkerId = 0;
+	let bruteforceGeneration = 0;
+	let poolForceFullRuntime = false;
+	let retiredTrials = 0;
+	let retiredImprovements = 0;
+	let retiredVerified = 0;
 	let gameRevision = $state(0);
 	let volume = $state(0.8);
 	let scriptText = $state(defaultText);
@@ -78,7 +94,12 @@
 		rewindFrame: null as number | null,
 		snapshotCount: 0,
 		optimizerBuildMs: 0,
+		optimizerValidated: false,
+		optimizerFallbackReason: '',
 		verified: 0,
+		workers: 0,
+		workerLimit: 1,
+		scaling: false,
 		debug: null as BruteforceDebug | null,
 		lastError: ''
 	});
@@ -110,6 +131,12 @@
 		const n = Number(value);
 		if (!Number.isFinite(n)) return '--';
 		return n >= 10 ? n.toFixed(1) : n.toFixed(2);
+	}
+
+	function runtimeModeLabel(mode: string) {
+		if (mode === 'deterministic-rewind') return 'validated rewind';
+		if (mode === 'mixed-runtime') return 'mixed exact modes';
+		return 'full runtime';
 	}
 
 	function postToGame(type: string, payload: Record<string, unknown> = {}) {
@@ -264,61 +291,229 @@
 		}
 	}
 
-	function ensureBruteforceWorker() {
-		bruteforceWorker?.terminate();
-		bruteforceWorker = new Worker(`/game/bruteforce-worker.js?sim=1&v=${Date.now()}`);
-		bruteforceWorker.addEventListener('message', handleBruteforceMessage);
-		bruteforceWorker.addEventListener('error', (event) => {
-			bruteforce.running = false;
-			bruteforce.lastError = event.message;
-			bruteforceWorker?.terminate();
-			bruteforceWorker = null;
-			setError(event.message);
-		});
-		return bruteforceWorker;
+	function workerCapacity() {
+		const concurrency = Math.max(1, Math.floor(Number(navigator.hardwareConcurrency) || 1));
+		return concurrency > 1 ? concurrency - 1 : 1;
 	}
 
-	function handleBruteforceMessage(event: MessageEvent<BruteforceWorkerMessage | GameMessage>) {
+	function activeWorkerSlots() {
+		return bruteforceWorkers.filter((slot) => !slot.stopped);
+	}
+
+	function activeTrialCount() {
+		return activeWorkerSlots().reduce((total, slot) => total + (slot.progress?.trials ?? 0), 0);
+	}
+
+	function aggregateDebug(slots: BruteforceWorkerSlot[], latest: BruteforceProgress): BruteforceDebug | null {
+		const reports = slots.flatMap((slot) => (slot.progress?.debug ? [slot.progress] : []));
+		if (!reports.length || !latest.debug) return latest.debug ?? null;
+		const keys: (keyof BruteforceDebugStats)[] = [
+			'workerMs',
+			'mutateMs',
+			'trialMs',
+			'prepareMs',
+			'pumpMs',
+			'frames',
+			'prepPumps'
+		];
+		const weight = reports.reduce((total, report) => total + Math.max(1, report.trials), 0);
+		const avg = {} as BruteforceDebugStats;
+		for (const key of keys) {
+			avg[key] =
+				reports.reduce(
+					(total, report) => total + (report.debug?.avg[key] ?? 0) * Math.max(1, report.trials),
+					0
+				) / weight;
+		}
+		return { last: latest.debug.last, avg };
+	}
+
+	function aggregateBruteforce(latest: BruteforceProgress) {
+		const slots = activeWorkerSlots();
+		const reports = slots.flatMap((slot) => (slot.progress ? [slot.progress] : []));
+		const previousBest = bruteforce.bestScore;
+		const bestReport = reports
+			.filter((report) => report.bestReached && Number.isFinite(report.bestScore))
+			.sort((left, right) => left.bestScore - right.bestScore)[0];
+		const improvedGlobally = !!bestReport && bestReport.bestScore < previousBest;
+
+		bruteforce.trials = retiredTrials + reports.reduce((total, report) => total + report.trials, 0);
+		bruteforce.rate = reports.reduce((total, report) => total + report.rate, 0);
+		bruteforce.improvements =
+			retiredImprovements + reports.reduce((total, report) => total + report.improvements, 0);
+		bruteforce.verified = retiredVerified + reports.reduce((total, report) => total + report.verified, 0);
+		bruteforce.lastScore = latest.lastScore;
+		bruteforce.lastReached = latest.lastReached;
+		bruteforce.workers = slots.length;
+		bruteforce.rewindFrame = latest.rewindFrame;
+		bruteforce.snapshotCount = reports.reduce(
+			(maximum, report) => Math.max(maximum, report.snapshotCount),
+			0
+		);
+		bruteforce.optimizerBuildMs = reports.reduce(
+			(maximum, report) => Math.max(maximum, report.optimizerBuildMs),
+			0
+		);
+		bruteforce.optimizerValidated = reports.some((report) => report.optimizerValidated);
+		bruteforce.optimizerFallbackReason =
+			reports.find((report) => report.optimizerFallbackReason)?.optimizerFallbackReason ?? '';
+		const modes = [...new Set(reports.map((report) => report.mode))];
+		bruteforce.mode = modes.length === 1 ? modes[0] : modes.length > 1 ? 'mixed-runtime' : '';
+		bruteforce.debug = aggregateDebug(slots, latest);
+		bruteforce.lastError = latest.error ?? '';
+
+		if (bestReport && (improvedGlobally || !Number.isFinite(bruteforce.bestScore))) {
+			bruteforce.best = bestReport.bestScript;
+			bruteforce.bestScore = bestReport.bestScore;
+			if (improvedGlobally && Number.isFinite(previousBest)) {
+				setStatus(`Improved to ${gameTime(bestReport.bestScore)}`);
+				if (settings.autoUseBest) setScriptText(serializeScript(bestReport.bestScript));
+			}
+		}
+	}
+
+	function retireWorker(slot: BruteforceWorkerSlot, countWork = true) {
+		if (slot.stopped) return;
+		slot.stopped = true;
+		if (countWork && slot.progress) {
+			retiredTrials += slot.progress.trials;
+			retiredImprovements += slot.progress.improvements;
+			retiredVerified += slot.progress.verified;
+		}
+		try {
+			slot.worker.postMessage(appMessage('STOP_BRUTEFORCE'));
+		} catch {}
+		slot.worker.terminate();
+		bruteforceWorkers = bruteforceWorkers.filter((candidate) => candidate !== slot);
+		bruteforce.workers = activeWorkerSlots().length;
+	}
+
+	function createBruteforceWorker(base: ScriptEntry[], level: number, workerSettings: BruteforceSettings) {
+		const id = nextBruteforceWorkerId++;
+		const worker = new Worker(`/game/bruteforce-worker.js?sim=1&v=${Date.now()}-${id}`);
+		const slot: BruteforceWorkerSlot = { id, worker, ready: false, stopped: false, progress: null };
+		bruteforceWorkers = [...bruteforceWorkers, slot];
+		bruteforce.workers = activeWorkerSlots().length;
+		worker.addEventListener('message', (event: MessageEvent<BruteforceWorkerMessage>) => {
+			handleBruteforceMessage(slot, event);
+		});
+		worker.addEventListener('error', (event) => {
+			if (slot.stopped) return;
+			retireWorker(slot);
+			bruteforce.lastError = event.message;
+			if (!activeWorkerSlots().length) {
+				bruteforce.running = false;
+				bruteforce.scaling = false;
+				setError(event.message);
+			}
+		});
+		worker.postMessage(
+			appMessage('START_BRUTEFORCE', {
+				base,
+				level,
+				workerId: id,
+				forceFullRuntime: poolForceFullRuntime,
+				settings: { ...workerSettings }
+			})
+		);
+		return slot;
+	}
+
+	function handleBruteforceMessage(
+		slot: BruteforceWorkerSlot,
+		event: MessageEvent<BruteforceWorkerMessage>
+	) {
+		if (slot.stopped) return;
 		const message = event.data;
 		if (!message || message.source !== 'circloo-tas-worker') return;
 
 		switch (message.type) {
 			case 'BRUTEFORCE_READY':
+				slot.ready = true;
 				if (bruteforce.running) setStatus('Bruteforcing');
 				break;
-			case 'BRUTEFORCE_PROGRESS': {
-				const hadImprovement = message.improvements > bruteforce.improvements;
-				bruteforce.trials = message.trials;
-				bruteforce.best = message.bestScript;
-				bruteforce.bestScore = message.bestScore;
-				bruteforce.lastScore = message.lastScore;
-				bruteforce.lastReached = message.lastReached;
-				bruteforce.improvements = message.improvements;
-				bruteforce.rate = message.rate;
-				bruteforce.mode = message.mode;
-				bruteforce.rewindFrame = message.rewindFrame;
-				bruteforce.snapshotCount = message.snapshotCount;
-				bruteforce.optimizerBuildMs = message.optimizerBuildMs;
-				bruteforce.verified = message.verified;
-				bruteforce.debug = message.debug ?? bruteforce.debug;
-				bruteforce.lastError = message.error ?? '';
-				if (hadImprovement) {
-					setStatus(`Improved to ${gameTime(message.bestScore)}`);
-					if (settings.autoUseBest) {
-						setScriptText(serializeScript(message.bestScript));
-					}
+			case 'BRUTEFORCE_PROGRESS':
+				slot.progress = message;
+				if (message.optimizerFallbackReason && message.optimizerFallbackReason !== 'unavailable') {
+					poolForceFullRuntime = true;
+				}
+				aggregateBruteforce(message);
+				break;
+			case 'BRUTEFORCE_STOPPED':
+				retireWorker(slot);
+				if (!activeWorkerSlots().length) {
+					bruteforce.running = false;
+					bruteforce.scaling = false;
 				}
 				break;
-			}
-			case 'BRUTEFORCE_STOPPED':
-				bruteforce.running = false;
-				break;
 			case 'BRUTEFORCE_ERROR':
-				bruteforce.running = false;
+				retireWorker(slot);
 				bruteforce.lastError = message.error;
-				setError(message.error);
+				if (!activeWorkerSlots().length) {
+					bruteforce.running = false;
+					bruteforce.scaling = false;
+					setError(message.error);
+				}
 				break;
 		}
+	}
+
+	function waitForPool(milliseconds: number, generation: number) {
+		return new Promise<boolean>((resolve) => {
+			window.setTimeout(() => resolve(bruteforce.running && generation === bruteforceGeneration), milliseconds);
+		});
+	}
+
+	async function waitForWorkerProgress(slot: BruteforceWorkerSlot, generation: number) {
+		for (let attempt = 0; attempt < 600; attempt += 1) {
+			if (!bruteforce.running || generation !== bruteforceGeneration || slot.stopped) return false;
+			if (slot.progress && slot.progress.trials > 0) return true;
+			if (!(await waitForPool(100, generation))) return false;
+		}
+		return false;
+	}
+
+	async function samplePoolRate(generation: number) {
+		const startedAt = performance.now();
+		const startedTrials = activeTrialCount();
+		if (!(await waitForPool(4000, generation))) return 0;
+		const elapsed = Math.max(0.001, (performance.now() - startedAt) / 1000);
+		return Math.max(0, activeTrialCount() - startedTrials) / elapsed;
+	}
+
+	async function scaleBruteforcePool(
+		generation: number,
+		initialBase: ScriptEntry[],
+		level: number,
+		workerSettings: BruteforceSettings
+	) {
+		bruteforce.scaling = true;
+		const first = activeWorkerSlots()[0];
+		if (!first || !(await waitForWorkerProgress(first, generation))) {
+			bruteforce.scaling = false;
+			return;
+		}
+		let bestRate = await samplePoolRate(generation);
+		let bestCount = 1;
+		while (
+			bruteforce.running &&
+			generation === bruteforceGeneration &&
+			activeWorkerSlots().length < bruteforce.workerLimit
+		) {
+			const candidate = createBruteforceWorker(initialBase, level, workerSettings);
+			if (!(await waitForWorkerProgress(candidate, generation))) {
+				retireWorker(candidate, false);
+				break;
+			}
+			const candidateRate = await samplePoolRate(generation);
+			if (candidateRate > bestRate * 1.01) {
+				bestRate = candidateRate;
+				bestCount = activeWorkerSlots().length;
+			}
+		}
+		const slots = activeWorkerSlots();
+		for (let index = slots.length - 1; index >= bestCount; index -= 1) retireWorker(slots[index]);
+		if (generation === bruteforceGeneration) bruteforce.scaling = false;
 	}
 
 	function toggleBruteforce() {
@@ -345,25 +540,34 @@
 		bruteforce.rewindFrame = null;
 		bruteforce.snapshotCount = 0;
 		bruteforce.optimizerBuildMs = 0;
+		bruteforce.optimizerValidated = false;
+		bruteforce.optimizerFallbackReason = '';
 		bruteforce.verified = 0;
+		bruteforce.workers = 0;
+		bruteforce.workerLimit = workerCapacity();
+		bruteforce.scaling = true;
 		bruteforce.debug = null;
 		bruteforce.lastError = '';
-		setStatus('Starting bruteforce worker');
-
-		ensureBruteforceWorker().postMessage(
-			appMessage('START_BRUTEFORCE', {
-				base,
-				level: bruteforceLevel(),
-				settings: { ...settings }
-			})
-		);
+		retiredTrials = 0;
+		retiredImprovements = 0;
+		retiredVerified = 0;
+		poolForceFullRuntime = false;
+		nextBruteforceWorkerId = 0;
+		const generation = ++bruteforceGeneration;
+		const level = bruteforceLevel();
+		const workerSettings = { ...settings };
+		setStatus('Starting adaptive bruteforce pool');
+		createBruteforceWorker(base, level, workerSettings);
+		void scaleBruteforcePool(generation, base, level, workerSettings);
 	}
 
 	function stopBruteforce() {
+		bruteforceGeneration += 1;
 		bruteforce.running = false;
-		bruteforceWorker?.postMessage(appMessage('STOP_BRUTEFORCE'));
-		bruteforceWorker?.terminate();
-		bruteforceWorker = null;
+		bruteforce.scaling = false;
+		for (const slot of [...bruteforceWorkers]) retireWorker(slot);
+		bruteforceWorkers = [];
+		bruteforce.workers = 0;
 	}
 
 	function useBest() {
@@ -416,8 +620,9 @@
 			window.removeEventListener('message', handleGameMessage);
 			window.clearTimeout(toastTimer);
 			window.clearTimeout(replayTimer);
-			bruteforceWorker?.terminate();
-			bruteforceWorker = null;
+			bruteforceGeneration += 1;
+			for (const slot of bruteforceWorkers) slot.worker.terminate();
+			bruteforceWorkers = [];
 		};
 	});
 </script>
@@ -636,11 +841,15 @@
 					<span>{bruteforce.trials} trials</span>
 					<span>{bruteforceTargetLabel}</span>
 					<span>{bruteforceRate.toFixed(1)}/s</span>
+					<span>{bruteforce.workers}/{bruteforce.workerLimit} workers{bruteforce.scaling ? ' (calibrating)' : ''}</span>
 					<span>best {gameTime(bruteforce.bestScore)}</span>
 					<span>{bruteforce.improvements} improvements</span>
 					<span>{bruteforce.verified} exact checks</span>
 					{#if bruteforce.mode}
-						<span>{bruteforce.mode === 'level1-adaptive-rewind' ? 'adaptive rewind' : 'full runtime'}</span>
+						<span>{runtimeModeLabel(bruteforce.mode)}</span>
+					{/if}
+					{#if bruteforce.optimizerFallbackReason && bruteforce.mode !== 'deterministic-rewind'}
+						<span>exact fallback: {bruteforce.optimizerFallbackReason}</span>
 					{/if}
 					{#if bruteforce.rewindFrame != null}
 						<span>last rewind {bruteforce.rewindFrame}</span>

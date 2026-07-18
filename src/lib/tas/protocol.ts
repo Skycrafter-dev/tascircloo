@@ -30,6 +30,7 @@ export type Telemetry = {
 };
 
 export type BruteforceProgress = {
+	workerId: number;
 	trials: number;
 	rate: number;
 	bestScore: number;
@@ -43,6 +44,8 @@ export type BruteforceProgress = {
 	rewindFrame: number | null;
 	snapshotCount: number;
 	optimizerBuildMs: number;
+	optimizerValidated: boolean;
+	optimizerFallbackReason: string;
 	verified: number;
 	debug?: BruteforceDebug;
 	error?: string;

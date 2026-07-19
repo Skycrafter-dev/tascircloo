@@ -2919,7 +2919,7 @@
 
 			const prefixTimes = state.cpTimes.slice(0, prefixCP + 1);
 			const prefixKey = scriptPrefixKey(normalized, resumeFrame);
-			const initialInput = inputAtFrame(normalized, resumeFrame);
+			const initialInput = inputAtFrame(normalized, resumeFrame - 1);
 			const velocityPrototype = Object.getPrototypeOf(workingBody._zC1());
 
 			function setHorizontalVelocity(value) {
@@ -3097,7 +3097,7 @@
 				templateBody,
 				prefixKey: scriptPrefixKey(baseScript, frame),
 				prefixTimes: prefixTimes.slice(),
-				initialInput: inputAtFrame(baseScript, frame),
+				initialInput: inputAtFrame(baseScript, frame - 1),
 				circleData: captureFinishCircles(),
 				scale: Number(wrapper._sd1),
 				stepRate: Number(wrapper._K62),
@@ -3355,6 +3355,346 @@
 			rebuild,
 			prefixMatches(candidate) {
 				return earliestInputDifference(baseScript, candidate) >= resumeFrame;
+			}
+		};
+	}
+
+	function createLevelOneFinishSevenOptimizer(script, options = {}) {
+		if (!IS_SIM) return null;
+		const level = Math.max(0, Math.floor(Number(options.level) || 0));
+		const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
+		const minFrame = Math.max(0, Math.floor(Number(options.minFrame) || 0));
+		if (level !== 1 || options.target !== 'finish' || finishCP !== 7 || minFrame < 1) return null;
+
+		const maxFrames = Math.max(1, Math.floor(Number(options.maxFrames) || 1));
+		const seed = Number.isFinite(Number(options.seed))
+			? Math.trunc(Number(options.seed)) | 0
+			: DEFAULT_GAMEPLAY_SEED;
+		const snapshotStride = Math.max(4, Math.floor(Number(options.fastSnapshotStride) || 8));
+		let baseScript = normalizeScript(script);
+		let snapshots = [];
+		let baseResult = null;
+		let lastRewindFrame = minFrame;
+		let buildMs = 0;
+
+		function activeFinishCircles() {
+			return (
+				callGlobal(
+					[
+						'var out = [];',
+						'var types = [21, 22, 23, 24];',
+						'for (var t = 0; t < types.length; t++) {',
+						'  var object = typeof _Gx !== "undefined" && _Gx ? _Gx._qH(types[t]) : null;',
+						'  var list = object && object._Ln2 ? object._Ln2._OH : null;',
+						'  if (!list) continue;',
+						'  for (var i = 0; i < list.length; i++) {',
+						'    var circle = list[i];',
+						'    if (!circle || circle._qf || !circle._rf || Number(circle._ye) > 0.5) continue;',
+						'    out.push({ id: Number(circle.id), x: Number(circle.x), y: Number(circle.y) });',
+						'  }',
+						'}',
+						'return out;'
+					].join('\n')
+				) || []
+			);
+		}
+
+		function findPlayerBody(world, playerId) {
+			for (
+				let body = world && typeof world._DF1 === 'function' ? world._DF1() : null;
+				body;
+				body = typeof body._kD1 === 'function' ? body._kD1() : null
+			) {
+				const instance = typeof body._bu1 === 'function' ? body._bu1() : null;
+				if (Number(instance && instance.id) === playerId) return body;
+			}
+			return null;
+		}
+
+		function captureSnapshot(frame) {
+			const wrapper = physicsWrapper();
+			const liveWorld = physicsWorld();
+			const player = gmPlayer();
+			const big = gmBig();
+			const liveBody = player && player._Xd1 && player._Xd1._932;
+			if (!wrapper || !liveWorld || !player || !big || !liveBody) return null;
+
+			const templateGraph = cloneSimulationGraph(liveWorld, { proxyGameMakerInstances: true });
+			const templateBody = templateGraph.map.get(liveBody);
+			if (!templateBody) return null;
+			const noContactListener = { _6E1() {}, _7E1() {}, _8E1() {}, _aE1() {} };
+			if (templateGraph.root._eC1) templateGraph.root._eC1._0F1 = noContactListener;
+
+			return {
+				frame,
+				cloneWorld: buildSimulationCloneFactory(templateGraph.root),
+				playerId: Number(player.id),
+				prefixKey: scriptPrefixKey(baseScript, frame),
+				prefixTimes: state.cpTimes.slice(),
+				prefixCP: state.collectedCP,
+				initialInput: inputAtFrame(baseScript, frame - 1),
+				circles: activeFinishCircles(),
+				bigRadius: Number(big._jd),
+				bigMaxRadius: Number(big._eq),
+				growthAlarm:
+					Array.isArray(big._md) && Number.isFinite(Number(big._md[0])) ? Number(big._md[0]) : -1,
+				scale: Number(wrapper._sd1),
+				stepRate: Number(wrapper._K62),
+				iterations: Number(wrapper._L62),
+				roomSpeed: Number(callGlobal('return typeof _Ux !== "undefined" && _Ux ? _Ux._AJ2 : null;')),
+				inputScale: Number(player._Ot) || 1,
+				extraInput: !!callGlobal('return !!(typeof global !== "undefined" && global && global._Fc);'),
+				collectRadius: 24 + (Number(player._jd) || 0)
+			};
+		}
+
+		function rebuild(nextBaseScript) {
+			const started = REAL.now();
+			baseScript = normalizeScript(nextBaseScript);
+			const inputFrames = new Set(
+				baseScript
+					.filter((entry) => entry.input !== 'U' && entry.frame >= minFrame)
+					.map((entry) => entry.frame)
+			);
+			const nextSnapshots = [];
+			state.exactCheckpointMode = true;
+			try {
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+				const prepared = prepareSimTrialLevel(level, seed);
+				if (!prepared.ready) return false;
+
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+				armReplay(baseScript, { normalized: true });
+				resetFreeze(gmLevel());
+				let reached = false;
+				let score = Infinity;
+
+				for (let index = 0; index < maxFrames; index++) {
+					const frame = gameFrame();
+					if (
+						frame >= minFrame &&
+						(frame === minFrame || (frame - minFrame) % snapshotStride === 0 || inputFrames.has(frame))
+					) {
+						const snapshot = captureSnapshot(frame);
+						if (snapshot) nextSnapshots.push(snapshot);
+					}
+
+					W.__circlooTasPumpFrame();
+					if (state.collectedCP >= finishCP) {
+						reached = true;
+						score = gameFrame();
+						break;
+					}
+				}
+
+				if (!nextSnapshots.length || nextSnapshots[0].frame !== minFrame) return false;
+				snapshots = nextSnapshots;
+				baseResult = {
+					reached,
+					score,
+					cp: state.collectedCP,
+					times: state.cpTimes.slice(),
+					debug: {
+						trialMs: 0,
+						prepareMs: 0,
+						pumpMs: 0,
+						frames: 0,
+						prepPumps: prepared.prepPumps,
+						rewindFrame: reached ? score : minFrame,
+						fast: true,
+						compact: true
+					}
+				};
+				lastRewindFrame = minFrame;
+				buildMs = REAL.now() - started;
+				return true;
+			} finally {
+				stopReplay();
+				state.exactCheckpointMode = false;
+			}
+		}
+
+		function chooseSnapshot(candidateScript, differenceFrame) {
+			let selected = snapshots[0];
+			for (const snapshot of snapshots) {
+				if (snapshot.frame > differenceFrame) break;
+				if (scriptPrefixKey(candidateScript, snapshot.frame) !== snapshot.prefixKey) break;
+				selected = snapshot;
+			}
+			return selected;
+		}
+
+		function evaluate(candidate) {
+			const candidateScript = normalizeScript(candidate);
+			const differenceFrame = earliestNormalizedInputDifference(baseScript, candidateScript);
+			if (!Number.isFinite(differenceFrame) || (baseResult.reached && differenceFrame >= baseResult.score)) {
+				lastRewindFrame = baseResult.reached ? baseResult.score : minFrame;
+				return {
+					...baseResult,
+					times: baseResult.times.slice(),
+					debug: { ...baseResult.debug, rewindFrame: lastRewindFrame, differenceFrame, frames: 0 }
+				};
+			}
+			if (differenceFrame < minFrame) {
+				return {
+					reached: false,
+					score: Infinity,
+					cp: 0,
+					times: [],
+					incompatiblePrefix: true,
+					debug: { rewindFrame: minFrame, differenceFrame, frames: 0, fast: true, compact: true }
+				};
+			}
+
+			const snapshot = chooseSnapshot(candidateScript, differenceFrame);
+			lastRewindFrame = snapshot.frame;
+			const restoreStart = REAL.now();
+			const world = snapshot.cloneWorld();
+			const body = findPlayerBody(world, snapshot.playerId);
+			if (!world || !body) {
+				return {
+					reached: false,
+					score: Infinity,
+					cp: snapshot.prefixCP,
+					times: snapshot.prefixTimes.slice(),
+					debug: { rewindFrame: snapshot.frame, differenceFrame, frames: 0, fast: true, compact: true }
+				};
+			}
+			const restoreMs = REAL.now() - restoreStart;
+
+			let frame = snapshot.frame;
+			let input = snapshot.initialInput;
+			let entryIndex = 0;
+			let cp = snapshot.prefixCP;
+			const times = snapshot.prefixTimes.slice();
+			let bigRadius = snapshot.bigRadius;
+			let growthAlarm = snapshot.growthAlarm;
+			const circles = snapshot.circles.map((circle) => ({ ...circle }));
+			while (
+				entryIndex < candidateScript.length &&
+				(candidateScript[entryIndex].input === 'U' || candidateScript[entryIndex].frame < frame)
+			) {
+				entryIndex++;
+			}
+
+			const velocityPrototype = Object.getPrototypeOf(body._zC1());
+			const nudgeHorizontalVelocity = (amount) => {
+				const current = body._zC1();
+				const velocity = Object.create(velocityPrototype);
+				velocity.x =
+					((current.x / snapshot.scale / snapshot.roomSpeed) + amount) *
+					snapshot.scale *
+					snapshot.roomSpeed;
+				velocity.y = current.y;
+				body._yC1(velocity);
+				body._pd1(true);
+			};
+			const applyInput = (nextInput) => {
+				if (nextInput.includes('L')) nudgeHorizontalVelocity(-0.52 * snapshot.inputScale);
+				if (nextInput.includes('R')) nudgeHorizontalVelocity(0.52 * snapshot.inputScale);
+				if (snapshot.extraInput && nextInput.includes('L')) nudgeHorizontalVelocity(-0.01);
+				if (snapshot.extraInput && nextInput.includes('R')) nudgeHorizontalVelocity(0.01);
+			};
+
+			const pumpStart = REAL.now();
+			while (frame < maxFrames) {
+				while (entryIndex < candidateScript.length && candidateScript[entryIndex].frame <= frame) {
+					if (candidateScript[entryIndex].input !== 'U') input = candidateScript[entryIndex].input;
+					entryIndex++;
+				}
+
+				if (growthAlarm > 0) {
+					growthAlarm -= 1;
+					if (growthAlarm === 0) {
+						bigRadius = Math.min(snapshot.bigMaxRadius, bigRadius + 200);
+						growthAlarm = -1;
+					}
+				}
+
+				applyInput(input);
+				frame++;
+				const position = body._Rc1();
+				const playerX = position.x / snapshot.scale;
+				const playerY = position.y / snapshot.scale;
+				for (let circleIndex = 0; circleIndex < circles.length; circleIndex++) {
+					const circle = circles[circleIndex];
+					const dx = playerX - circle.x;
+					const dy = playerY - circle.y;
+					if (dx * dx + dy * dy >= snapshot.collectRadius * snapshot.collectRadius) continue;
+
+					circles.splice(circleIndex, 1);
+					cp += 1;
+					times[cp] = frame;
+					if (bigRadius < snapshot.bigMaxRadius) growthAlarm = 10;
+					else if (cp >= finishCP) {
+						return {
+							reached: true,
+							score: frame,
+							cp,
+							times,
+							debug: {
+								trialMs: restoreMs + (REAL.now() - pumpStart),
+								prepareMs: restoreMs,
+								pumpMs: REAL.now() - pumpStart,
+								frames: frame - snapshot.frame,
+								prepPumps: 0,
+								rewindFrame: snapshot.frame,
+								differenceFrame,
+								fast: true,
+								compact: true
+							}
+						};
+					}
+					break;
+				}
+
+				world._jF1(1 / snapshot.stepRate, snapshot.iterations, snapshot.iterations);
+				world._nF1();
+			}
+
+			return {
+				reached: false,
+				score: Infinity,
+				cp,
+				times,
+				debug: {
+					trialMs: restoreMs + (REAL.now() - pumpStart),
+					prepareMs: restoreMs,
+					pumpMs: REAL.now() - pumpStart,
+					frames: frame - snapshot.frame,
+					prepPumps: 0,
+					rewindFrame: snapshot.frame,
+					differenceFrame,
+					fast: true,
+					compact: true
+				}
+			};
+		}
+
+		if (!rebuild(baseScript)) return null;
+		return {
+			level,
+			finishCP,
+			get resumeFrame() {
+				return minFrame;
+			},
+			get rewindFrame() {
+				return lastRewindFrame;
+			},
+			get snapshotCount() {
+				return snapshots.length;
+			},
+			get buildMs() {
+				return buildMs;
+			},
+			evaluate,
+			rebuild,
+			prefixMatches(candidate) {
+				return earliestInputDifference(baseScript, candidate) >= minFrame;
 			}
 		};
 	}
@@ -3664,6 +4004,11 @@
 				}
 			}
 			const pumpMs = REAL.now() - pumpStart;
+			const finalPlayer = gmPlayer();
+			const finalBody = finalPlayer && finalPlayer._Xd1 && finalPlayer._Xd1._932;
+			const finalBig = gmBig();
+			const finalPosition = finalBody && typeof finalBody._Rc1 === 'function' ? finalBody._Rc1() : null;
+			const finalVelocity = finalBody && typeof finalBody._zC1 === 'function' ? finalBody._zC1() : null;
 
 			return {
 				score,
@@ -3679,7 +4024,19 @@
 					startRadius: prepareDebug.startRadius,
 					endRadius: prepareDebug.endRadius,
 					endFrame: prepareDebug.endFrame,
-					ready: prepareDebug.ready
+					ready: prepareDebug.ready,
+					finalState: {
+						frame: gameFrame(),
+						checkpoint: state.collectedCP,
+						growthAlarm: Array.isArray(finalBig && finalBig._md) ? Number(finalBig._md[0]) : -1,
+						boundaryRadius: Number(finalBig && finalBig._jd),
+						x: Number(finalPosition && finalPosition.x),
+						y: Number(finalPosition && finalPosition.y),
+						vx: Number(finalVelocity && finalVelocity.x),
+						vy: Number(finalVelocity && finalVelocity.y),
+						angle: Number(finalBody && typeof finalBody._Hq1 === 'function' ? finalBody._Hq1() : NaN),
+						angularVelocity: Number(finalBody && typeof finalBody._BC1 === 'function' ? finalBody._BC1() : NaN)
+					}
 				}
 			};
 		} finally {
@@ -3688,10 +4045,517 @@
 		}
 	}
 
+	function inspectCompactPhysics(script, options = {}, targetFrame = 0) {
+		if (!IS_SIM) return null;
+		const normalized = normalizeScript(script);
+		state.exactCheckpointMode = true;
+		try {
+			state.cpTimes = [];
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			const prepared = prepareSimTrialLevel(options.level, options.seed);
+			if (!prepared.ready) return { prepared };
+			state.cpTimes = [];
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			armReplay(normalized, { normalized: true });
+			resetFreeze(gmLevel());
+			let snapshotPumps = 0;
+			const maximumSnapshotPumps = Math.max(240, Math.max(0, targetFrame) * 2 + 240);
+			while (gameFrame() < targetFrame && snapshotPumps < maximumSnapshotPumps) {
+				W.__circlooTasPumpFrame();
+				snapshotPumps++;
+			}
+			if (gameFrame() < targetFrame) {
+				return {
+					prepared: {
+						...prepared,
+						ready: false,
+						reason: 'snapshot-frame-unreachable',
+						targetFrame,
+						actualFrame: gameFrame(),
+						pumps: snapshotPumps
+					}
+				};
+			}
+
+			function serial(value, depth = 0, seen = new Set()) {
+				if (value == null || typeof value === 'number' || typeof value === 'string' || typeof value === 'boolean') return value;
+				if (typeof value === 'function') return `[fn:${value.name || 'anonymous'}]`;
+				if (depth >= 3 || seen.has(value)) return `[${value.constructor && value.constructor.name || typeof value}]`;
+				seen.add(value);
+				if (Array.isArray(value)) return value.slice(0, 32).map((item) => serial(item, depth + 1, seen));
+				const out = { __class: value.constructor && value.constructor.name || '' };
+				for (const key of Reflect.ownKeys(value).slice(0, 96)) {
+					if (typeof key !== 'string') continue;
+					let item;
+					try { item = value[key]; } catch { continue; }
+					if (typeof item === 'function') continue;
+					out[key] = serial(item, depth + 1, seen);
+				}
+				return out;
+			}
+
+			function exactShape(shape) {
+				if (!shape) return null;
+				const type = Number(shape._461);
+				let vertices = [];
+				if (type === 1) {
+					vertices = [vec(shape._Gs1), vec(shape._Hs1)].filter(Boolean);
+				} else if (Array.isArray(shape._Ts1)) {
+					vertices = shape._Ts1
+						.slice(0, Math.max(0, Number(shape._Us1) || shape._Ts1.length))
+						.map(vec);
+				}
+				return {
+					type,
+					radius: Number(shape._as1),
+					center: vec(shape._ts1),
+					vertices,
+					vertexCount: Number(shape._Us1),
+					previousVertex: vec(type === 1 ? shape._Fs1 : shape._Vs1),
+					nextVertex: vec(type === 1 ? shape._Is1 : shape._Ws1),
+					hasPreviousVertex: !!(type === 1 ? shape._Js1 : shape._Xs1),
+					hasNextVertex: !!(type === 1 ? shape._Ks1 : shape._Ys1)
+				};
+			}
+
+			const wrapper = physicsWrapper();
+			const world = physicsWorld();
+			const bodies = [];
+			const bodyIds = new Map();
+			for (
+				let body = world && typeof world._DF1 === 'function' ? world._DF1() : null, bodyIndex = 0;
+				body;
+				body = typeof body._kD1 === 'function' ? body._kD1() : null, bodyIndex++
+			) {
+				bodyIds.set(body, bodyIndex);
+				const fixtures = [];
+				for (
+					let fixture = typeof body._hD1 === 'function' ? body._hD1() : null;
+					fixture;
+					fixture = typeof fixture._kD1 === 'function' ? fixture._kD1() : null
+				) {
+					const shape =
+						typeof fixture._ED1 === 'function'
+							? fixture._ED1()
+							: fixture._zD1 || fixture._7D1 || fixture._3D1 || null;
+					fixtures.push({
+						fixtureClass: fixture.constructor && fixture.constructor.name,
+						shapeClass: shape && shape.constructor && shape.constructor.name,
+						shape: exactShape(shape),
+						density: typeof fixture._MD1 === 'function' ? Number(fixture._MD1()) : Number(fixture._iC1),
+						friction: typeof fixture._ND1 === 'function' ? Number(fixture._ND1()) : Number(fixture._CD1),
+						restitution: typeof fixture._OD1 === 'function' ? Number(fixture._OD1()) : Number(fixture._DD1),
+						sensor: typeof fixture._GD1 === 'function' ? !!fixture._GD1() : !!fixture._BD1,
+						filter: (() => {
+							const filter = typeof fixture._JD1 === 'function' ? fixture._JD1() : fixture._AD1;
+							return filter
+								? {
+									categoryBits: Number(filter._sD1),
+									maskBits: Number(filter._tD1),
+									groupIndex: Number(filter._uD1)
+								}
+								: null;
+						})(),
+						fixture: serial(fixture)
+					});
+				}
+				const user = typeof body._bu1 === 'function' ? body._bu1() : null;
+				bodies.push({
+					bodyIndex,
+					bodyClass: body.constructor && body.constructor.name,
+					userId: Number(user && user.id),
+					objectIndex: Number(user && user._Ok),
+					type: typeof body._bs1 === 'function' ? body._bs1() : null,
+					position: vec(typeof body._Rc1 === 'function' ? body._Rc1() : null),
+					angle: typeof body._Hq1 === 'function' ? body._Hq1() : null,
+					linearVelocity: vec(typeof body._zC1 === 'function' ? body._zC1() : null),
+					angularVelocity: typeof body._BC1 === 'function' ? body._BC1() : null,
+					linearDamping: typeof body._YC1 === 'function' ? Number(body._YC1()) : Number(body._OB1),
+					angularDamping: typeof body._ZC1 === 'function' ? Number(body._ZC1()) : Number(body._PB1),
+					gravityScale: typeof body.__C1 === 'function' ? Number(body.__C1()) : Number(body._QB1),
+					sleepTime: Number(body._TB1) || 0,
+					allowSleep: typeof body._bD1 === 'function' ? !!body._bD1() : true,
+					awake: typeof body._cD1 === 'function' ? !!body._cD1() : true,
+					active: typeof body._eD1 === 'function' ? !!body._eD1() : true,
+					bullet: typeof body._9D1 === 'function' ? !!body._9D1() : false,
+					fixedRotation: typeof body._gD1 === 'function' ? !!body._gD1() : false,
+					body: serial(body),
+					fixtures
+				});
+			}
+			const joints = [];
+			for (
+				let joint = world && typeof world._iD1 === 'function' ? world._iD1() : null, jointIndex = 0;
+				joint;
+				joint = typeof joint._kD1 === 'function' ? joint._kD1() : joint._LB1 || null, jointIndex++
+			) {
+				joints.push(jointSnapshot(joint, jointIndex, bodyIds));
+			}
+			return {
+				frame: gameFrame(),
+				cp: state.collectedCP,
+				times: state.cpTimes.slice(),
+				collectibles:
+					callGlobal(
+						[
+							'var out = []; var types = [21,22,23,24];',
+							'for (var t = 0; t < types.length; t++) {',
+							' var object = _Gx && _Gx._qH(types[t]);',
+							' var list = object && object._Ln2 ? object._Ln2._OH : null;',
+							' if (!list) continue;',
+							' for (var i = 0; i < list.length; i++) {',
+							'  var circle = list[i]; if (!circle) continue;',
+							'  out.push({type:types[t],id:Number(circle.id),objectIndex:Number(circle._Ok),x:Number(circle.x),y:Number(circle.y),',
+							'   physicsX:Number(circle._972),physicsY:Number(circle._a72),radius:Number(circle._jd),',
+							'   collected:!!circle._qf,active:!!circle._rf,excluded:Number(circle._ye)>0.5,',
+							'   fields:(function(){var fields={}; var names=["_jd","_nd","_od","_pd","_qf","_rf","_sf","_tf","_uf","_vf","_wf","_xf","_yf","_zf","_Af","_Bf","_Cf","_Df","_Ef","_Ff","_Gf","_Hf","_If","_Jf","_Kf","_Lf","_Mf","_Nf","_Of","_Pf","_Qf","_Rf","_Sf","_Tf","_Uf","_Vf","_Wf","_Xf","_Yf","_Zf","__f","_0f","_1f","_2f","_3f","_4f","_5f","_6f","_7f","_8f","_9f","_ye","_Ot","_hq"]; for(var n=0;n<names.length;n++){var key=names[n];var value=circle[key];if(value==null||typeof value==="number"||typeof value==="string"||typeof value==="boolean")fields[key]=value;}return fields;})()});',
+							' }',
+							'} return out;'
+						].join('\n')
+					) || [],
+				wrapper: {
+					scale: Number(wrapper && wrapper._sd1),
+					stepRate: Number(wrapper && wrapper._K62),
+					roomSpeed: Number(callGlobal('return typeof _Ux !== "undefined" && _Ux ? _Ux._AJ2 : 60;')),
+					velocityIterations: Number(wrapper && wrapper._L62),
+					positionIterations: Number(wrapper && wrapper._L62),
+					raw: serial(wrapper)
+				},
+				world: world
+					? {
+						gravity: vec(world._IE1),
+						allowSleep: typeof world._FF1 === 'function' ? !!world._FF1() : true,
+						warmStarting: typeof world._HF1 === 'function' ? !!world._HF1() : true,
+						continuousPhysics: typeof world._JF1 === 'function' ? !!world._JF1() : true,
+						subStepping: typeof world._LF1 === 'function' ? !!world._LF1() : false,
+						bodyCount: bodies.length,
+						jointCount: joints.length
+					}
+					: null,
+				joints,
+				player: (() => {
+					const player = gmPlayer();
+					return player
+						? {
+							id: Number(player.id),
+							objectIndex: Number(player._Ok),
+							x: Number(player.x),
+							y: Number(player.y),
+							radius: Number(player._jd),
+							inputScale: Number(player._Ot) || 1,
+							extraInput: !!callGlobal('return !!(typeof global !== "undefined" && global && global._Fc);'),
+							fields: serial(player)
+						}
+						: null;
+				})(),
+				big: (() => {
+					const big = gmBig();
+					return big
+						? {
+							id: Number(big.id),
+							objectIndex: Number(big._Ok),
+							x: Number(big.x),
+							y: Number(big.y),
+							radius: Number(big._jd),
+							radiusStep: Number(big._nd),
+							maxRadius: Number(big._eq),
+							growthAlarm: Array.isArray(big._md) ? Number(big._md[0]) : -1,
+							fields: serial(big)
+						}
+						: null;
+				})(),
+				bodies
+			};
+		} finally {
+			stopReplay();
+			state.exactCheckpointMode = false;
+		}
+	}
+
+	function traceCompactPhysics(script, options = {}, startFrame = 0, endFrame = 0) {
+		if (!IS_SIM) return null;
+		const normalized = normalizeScript(script);
+		const boundaryOnly = !!options.boundaryOnly;
+		const solverEvents = [];
+		const solverStartFrame = Math.floor(Number(options.solverStartFrame ?? 307));
+		const solverEndFrame = Math.floor(Number(options.solverEndFrame ?? 310));
+		const solverChildren = new Set(
+			(Array.isArray(options.solverChildren) ? options.solverChildren : [92])
+				.map((value) => Math.floor(Number(value)))
+				.filter(Number.isFinite)
+		);
+		const solverPrototype =
+			!boundaryOnly && W.b2 && W.b2.ContactSolver ? W.b2.ContactSolver.prototype : null;
+		const originalInitializeVelocity = solverPrototype && solverPrototype._YM1;
+		const originalSolveVelocity = solverPrototype && solverPrototype._mN1;
+		state.exactCheckpointMode = true;
+		try {
+			state.cpTimes = [];
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			const prepared = prepareSimTrialLevel(options.level, options.seed);
+			if (!prepared.ready) return { prepared };
+			state.cpTimes = [];
+			state.collectedCP = 0;
+			state.lastCP = 0;
+			armReplay(normalized, { normalized: true });
+			resetFreeze(gmLevel());
+
+			const captureSolverConstraint = (solver, phase) => {
+				const frame = gameFrame();
+				if (
+					frame < solverStartFrame ||
+					frame > solverEndFrame ||
+					!solver ||
+					!Array.isArray(solver._PM1)
+				) return;
+				for (const constraint of solver._PM1) {
+					if (!constraint || !(constraint._cw1 > 0)) continue;
+					const contact = solver._VM1 && solver._VM1[constraint._HM1];
+					const childA = Number(contact && contact._LL1);
+					const childB = Number(contact && contact._ML1);
+					if (!solverChildren.has(childA) && !solverChildren.has(childB)) continue;
+					const point = constraint._aw1 && constraint._aw1[0];
+					const velocityA = solver._UM1 && solver._UM1[constraint._Gu1];
+					const velocityB = solver._UM1 && solver._UM1[constraint._Hu1];
+					solverEvents.push({
+						frame,
+						phase,
+						childA,
+						childB,
+						normal: vec(constraint._ms1),
+						rA: vec(point && point._Wv1),
+						rB: vec(point && point._Xv1),
+						normalMass: Number(point && point._tM1),
+						tangentMass: Number(point && point._uM1),
+						velocityBias: Number(point && point._vM1),
+						normalImpulse: Number(point && point._6w1),
+						tangentImpulse: Number(point && point._7w1),
+						vA: vec(velocityA && velocityA._3B),
+						wA: Number(velocityA && velocityA._77),
+						vB: vec(velocityB && velocityB._3B),
+						wB: Number(velocityB && velocityB._77)
+					});
+				}
+			};
+
+			if (solverPrototype && typeof originalInitializeVelocity === 'function') {
+				solverPrototype._YM1 = function tracedInitializeVelocity() {
+					const result = originalInitializeVelocity.apply(this, arguments);
+					captureSolverConstraint(this, 'initialize');
+					return result;
+				};
+			}
+			if (solverPrototype && typeof originalSolveVelocity === 'function') {
+				solverPrototype._mN1 = function tracedSolveVelocity() {
+					captureSolverConstraint(this, 'solve-before');
+					const result = originalSolveVelocity.apply(this, arguments);
+					captureSolverConstraint(this, 'solve-after');
+					return result;
+				};
+			}
+
+			let traceStartPumps = 0;
+			const maximumTraceStartPumps = Math.max(240, Math.max(0, startFrame) * 2 + 240);
+			while (gameFrame() < startFrame && traceStartPumps < maximumTraceStartPumps) {
+				W.__circlooTasPumpFrame();
+				traceStartPumps++;
+			}
+			if (gameFrame() < startFrame) {
+				return {
+					prepared: {
+						...prepared,
+						ready: false,
+						reason: 'trace-start-frame-unreachable',
+						targetFrame: startFrame,
+						actualFrame: gameFrame(),
+						pumps: traceStartPumps
+					},
+					times: state.cpTimes.slice(),
+					frames: [],
+					boundaryStates: [],
+					solverEvents: []
+				};
+			}
+			const frames = [];
+			const boundaryStates = [];
+			let lastBoundaryRadius = null;
+			const maxSteps = Math.max(1, endFrame - startFrame + 2);
+			for (let step = 0; step < maxSteps && gameFrame() <= endFrame; step++) {
+				const player = gmPlayer();
+				const body = player && player._Xd1 && player._Xd1._932;
+				const big = gmBig();
+				const boundaryRadius = Number(big && big._jd);
+				if (Number.isFinite(boundaryRadius) && boundaryRadius !== lastBoundaryRadius) {
+					const boundaryBody = big && big._Xd1 && big._Xd1._932;
+					const boundaryFixture = boundaryBody && typeof boundaryBody._hD1 === 'function' ? boundaryBody._hD1() : null;
+					const boundaryShape = boundaryFixture && typeof boundaryFixture._ED1 === 'function'
+						? boundaryFixture._ED1()
+						: boundaryFixture && (boundaryFixture._zD1 || boundaryFixture._7D1 || boundaryFixture._3D1);
+					const filter = boundaryFixture && (typeof boundaryFixture._JD1 === 'function' ? boundaryFixture._JD1() : boundaryFixture._AD1);
+					const staticCircles = [];
+					const liveWorld = physicsWorld();
+					for (
+						let staticBody = liveWorld && typeof liveWorld._DF1 === 'function' ? liveWorld._DF1() : null;
+						staticBody;
+						staticBody = typeof staticBody._kD1 === 'function' ? staticBody._kD1() : null
+					) {
+						if (typeof staticBody._bs1 === 'function' && Number(staticBody._bs1()) !== 0) continue;
+						const staticUser = typeof staticBody._bu1 === 'function' ? staticBody._bu1() : null;
+						if (!staticUser || Number(staticUser.id) === Number(big && big.id)) continue;
+						const staticFixture = typeof staticBody._hD1 === 'function' ? staticBody._hD1() : null;
+						const staticShape = staticFixture && typeof staticFixture._ED1 === 'function'
+							? staticFixture._ED1()
+							: staticFixture && (staticFixture._zD1 || staticFixture._7D1 || staticFixture._3D1);
+						if (!staticShape || Number(staticShape._461) !== 0) continue;
+						const staticFilter = typeof staticFixture._JD1 === 'function' ? staticFixture._JD1() : staticFixture._AD1;
+						staticCircles.push({
+							id: Number(staticUser.id),
+							objectIndex: Number(staticUser._Ok),
+							position: vec(typeof staticBody._Rc1 === 'function' ? staticBody._Rc1() : null),
+							angle: Number(typeof staticBody._Hq1 === 'function' ? staticBody._Hq1() : 0),
+							radius: Number(staticShape._as1),
+							friction: Number(typeof staticFixture._ND1 === 'function' ? staticFixture._ND1() : staticFixture._CD1),
+							restitution: Number(typeof staticFixture._OD1 === 'function' ? staticFixture._OD1() : staticFixture._DD1),
+							filter: staticFilter ? { categoryBits: Number(staticFilter._sD1), maskBits: Number(staticFilter._tD1), groupIndex: Number(staticFilter._uD1) } : null
+						});
+					}
+					staticCircles.sort((left, right) => left.id - right.id);
+					boundaryStates.push({
+						frame: gameFrame(),
+						radius: boundaryRadius,
+						bodyPosition: vec(boundaryBody && typeof boundaryBody._Rc1 === 'function' ? boundaryBody._Rc1() : null),
+						bodyAngle: Number(boundaryBody && typeof boundaryBody._Hq1 === 'function' ? boundaryBody._Hq1() : 0),
+						shapeRadius: Number(boundaryShape && boundaryShape._as1),
+						vertexCount: Number(boundaryShape && boundaryShape._Us1),
+						vertices: Array.isArray(boundaryShape && boundaryShape._Ts1)
+							? boundaryShape._Ts1.slice(0, Math.max(0, Number(boundaryShape._Us1) || boundaryShape._Ts1.length)).map(vec)
+							: [],
+						friction: Number(boundaryFixture && (typeof boundaryFixture._ND1 === 'function' ? boundaryFixture._ND1() : boundaryFixture._CD1)),
+						restitution: Number(boundaryFixture && (typeof boundaryFixture._OD1 === 'function' ? boundaryFixture._OD1() : boundaryFixture._DD1)),
+						filter: filter ? { categoryBits: Number(filter._sD1), maskBits: Number(filter._tD1), groupIndex: Number(filter._uD1) } : null,
+						staticCircles
+					});
+					lastBoundaryRadius = boundaryRadius;
+				}
+				if (boundaryOnly) {
+					if (state.collectedCP >= Math.max(1, Math.floor(Number(options.finishCP) || 7))) break;
+					W.__circlooTasPumpFrame();
+					continue;
+				}
+				const contacts = [];
+				const world = physicsWorld();
+				for (let contact = world && world._eC1 ? world._eC1._JB1 : null; contact; contact = contact._LB1) {
+					const fixtureA = typeof contact._pC1 === 'function' ? contact._pC1() : contact._2G1;
+					const fixtureB = typeof contact._rC1 === 'function' ? contact._rC1() : contact._4G1;
+					const bodyA = fixtureA && typeof fixtureA._LD1 === 'function' ? fixtureA._LD1() : null;
+					const bodyB = fixtureB && typeof fixtureB._LD1 === 'function' ? fixtureB._LD1() : null;
+					const userA = bodyA && typeof bodyA._bu1 === 'function' ? bodyA._bu1() : null;
+					const userB = bodyB && typeof bodyB._bu1 === 'function' ? bodyB._bu1() : null;
+					const manifold = typeof contact._OL1 === 'function' ? contact._OL1() : contact._IL1;
+					const manifoldPoints = [];
+					const manifoldCount = Math.max(0, Number(manifold && manifold._cw1) || 0);
+					for (let pointIndex = 0; pointIndex < manifoldCount; pointIndex++) {
+						const point = manifold._aw1 && manifold._aw1[pointIndex];
+						manifoldPoints.push({
+							localPoint: vec(point && point._5w1),
+							normalImpulse: Number(point && point._6w1),
+							tangentImpulse: Number(point && point._7w1),
+							id: Number(point && point.id && typeof point.id._qH === 'function' ? point.id._qH() : 0)
+						});
+					}
+					contacts.push({
+						a: Number(userA && userA.id),
+						b: Number(userB && userB.id),
+						childA: Number(typeof contact._tF1 === 'function' ? contact._tF1() : contact._LL1),
+						childB: Number(typeof contact._vF1 === 'function' ? contact._vF1() : contact._ML1),
+						flags: Number(contact._zB1),
+						toiCount: Number(contact._8G1),
+						toi: Number(contact._9G1),
+						friction: Number(contact._CD1),
+						restitution: Number(contact._DD1),
+						manifold: {
+							type: Number(manifold && manifold.type),
+							localNormal: vec(manifold && manifold._bw1),
+							localPoint: vec(manifold && manifold._5w1),
+							points: manifoldPoints
+						}
+					});
+				}
+				frames.push({
+					frame: gameFrame(),
+					cp: state.collectedCP,
+					input: effectiveInput(),
+					contacts,
+					instancePosition: player ? { x: Number(player.x), y: Number(player.y) } : null,
+					playerRadius: Number(player && player._jd),
+					collectibles:
+						callGlobal(
+							[
+								'var out = []; var object = _Gx && _Gx._qH(21);',
+								'var list = object && object._Ln2 ? object._Ln2._OH : null;',
+								'if (list) for (var i = 0; i < list.length; i++) {',
+								' var item = list[i]; if (!item) continue;',
+								' out.push({id:Number(item.id),x:Number(item.x),y:Number(item.y),',
+								'  collected:!!item._qf,active:!!item._rf,fade:Number(item._tq),excluded:Number(item._ye)>0.5});',
+								'} return out;'
+							].join('\n')
+						) || [],
+					position: vec(body && body._Rc1()),
+					linearVelocity: vec(body && body._zC1()),
+					angle: body && body._Hq1(),
+					angularVelocity: body && body._BC1(),
+					bigRadius: Number(big && big._jd),
+					alarm: Array.isArray(big && big._md) ? Number(big._md[0]) : -1
+				});
+				if (state.collectedCP >= Math.max(1, Math.floor(Number(options.finishCP) || 7))) break;
+				W.__circlooTasPumpFrame();
+			}
+			return { prepared, times: state.cpTimes.slice(), frames, boundaryStates, solverEvents, solverProbe: { b2: !!W.b2, keys: W.b2 ? Object.keys(W.b2).filter((key) => key.toLowerCase().includes('contact')).slice(0, 30) : [], contactSolver: !!(W.b2 && W.b2.ContactSolver), contactSolverType: typeof (W.b2 && W.b2.ContactSolver), contactSolverKeys: W.b2 && W.b2.ContactSolver ? Object.keys(W.b2.ContactSolver).slice(0, 30) : [], methods: solverPrototype ? Object.getOwnPropertyNames(solverPrototype) : [] } };
+		} finally {
+			if (solverPrototype && originalInitializeVelocity) solverPrototype._YM1 = originalInitializeVelocity;
+			if (solverPrototype && originalSolveVelocity) solverPrototype._mN1 = originalSolveVelocity;
+			stopReplay();
+			state.exactCheckpointMode = false;
+		}
+	}
+
+	function captureWasmRuntimeModel(script, options = {}, snapshotFrame = 0, endFrame = 0) {
+		if (!IS_SIM) return null;
+		const normalized = normalizeScript(script);
+		const inspection = inspectCompactPhysics(normalized, options, snapshotFrame);
+		if (!inspection || (inspection.prepared && !inspection.prepared.ready)) {
+			return { inspection, boundaryStates: [], times: [] };
+		}
+		const trace = traceCompactPhysics(
+			normalized,
+			{
+				...options,
+				boundaryOnly: true,
+				solverStartFrame: endFrame + 1,
+				solverEndFrame: endFrame + 1,
+				solverChildren: []
+			},
+			snapshotFrame,
+			endFrame
+		);
+		return {
+			inspection,
+			boundaryStates: trace && Array.isArray(trace.boundaryStates) ? trace.boundaryStates : [],
+			times: trace && Array.isArray(trace.times) ? trace.times : []
+		};
+	}
+
 	W.__circlooTasRunTrial = simTrial;
+	W.__circlooTasInspectCompactPhysics = inspectCompactPhysics;
+	W.__circlooTasTraceCompactPhysics = traceCompactPhysics;
+	W.__circlooTasCaptureWasmRuntimeModel = captureWasmRuntimeModel;
 	W.__circlooTasDeterminismDigest = determinismDigest;
 	W.__circlooTasCreateFinishOptimizer = createLevelOneFinishOptimizer;
 	W.__circlooTasCreateAdaptiveFinishOptimizer = createLevelOneAdaptiveFinishOptimizer;
+	W.__circlooTasCreateFinishSevenOptimizer = createLevelOneFinishSevenOptimizer;
 	W.__circlooTasCreateDynamicFinishOptimizer = createDynamicTargetOptimizer;
 	W.__circlooTasPatchGameHooks = patchGameHooks;
 	W.__circlooTasRequestReplay = requestCanonicalReplay;

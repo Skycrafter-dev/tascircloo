@@ -134,6 +134,7 @@
 	}
 
 	function runtimeModeLabel(mode: string) {
+		if (mode === 'wasm-runtime') return 'validated Wasm runtime';
 		if (mode === 'deterministic-rewind') return 'validated rewind';
 		if (mode === 'mixed-runtime') return 'mixed exact modes';
 		return 'full runtime';

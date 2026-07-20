@@ -28,6 +28,9 @@ assert.match(bridge, /normalImpulse: Number\(point && point\._6w1\)/);
 assert.match(bridge, /case 'SET_GAME_SPEED':/);
 assert.match(bridge, /function updateReplayScript\(/);
 assert.match(bridge, /state\.rafAccumulator \+= elapsed \* \(FPS \/ 1000\) \* state\.gameSpeed/);
-assert.match(html, /tas-bridge\.js\?v=68/);
+assert.match(bridge, /scoreCheckpoint = state\.collectedCP/);
+assert.match(bridge, /scoreCheckpoint,/);
+assert.match(bridge, /if \(state\.collectedCP < minCheckpoint\) return;/);
+assert.match(html, /tas-bridge\.js\?v=69/);
 
 console.log('All-level custom engine support verified');

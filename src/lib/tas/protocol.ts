@@ -100,6 +100,7 @@ export type BruteforceSettings = {
 	pointZ: number;
 	pointMinFrame: number;
 	pointMaxFrame: number;
+	minCheckpoint: number;
 	maxFrames: number;
 	minFrame: number;
 	maxFrame: number;

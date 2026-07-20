@@ -41,6 +41,7 @@
 		pointZ: 0,
 		pointMinFrame: 0,
 		pointMaxFrame: 520,
+		minCheckpoint: 0,
 		maxFrames: 520,
 		minFrame: 386,
 		maxFrame: 520,
@@ -390,6 +391,7 @@
 				pointMinFrame,
 				integer(source.pointMaxFrame, defaultBruteforceSettings.pointMaxFrame)
 			),
+			minCheckpoint: integer(source.minCheckpoint, defaultBruteforceSettings.minCheckpoint),
 			maxFrames: integer(source.maxFrames, defaultBruteforceSettings.maxFrames, 1),
 			minFrame: integer(source.minFrame, defaultBruteforceSettings.minFrame),
 			maxFrame: integer(source.maxFrame, defaultBruteforceSettings.maxFrame),
@@ -988,6 +990,19 @@
 									</button>
 								</div>
 							{/if}
+						</div>
+					</section>
+
+					<section class="settings-section" aria-labelledby="conditions-heading">
+						<h3 id="conditions-heading">Conditions</h3>
+						<p class="settings-help">
+							Every condition must be met when a score is achieved before that result can become the new best.
+						</p>
+						<div class="settings-grid">
+							<label>
+								<span class="setting-label">Min Checkpoint</span>
+								<input type="number" min="0" bind:value={settings.minCheckpoint} onchange={saveSettings} />
+							</label>
 						</div>
 					</section>
 

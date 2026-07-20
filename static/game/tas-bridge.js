@@ -4522,6 +4522,7 @@
 				pointMinFrame,
 				Math.floor(Number(options.pointMaxFrame) || pointMinFrame)
 			);
+			const minCheckpoint = Math.max(0, Math.floor(Number(options.minCheckpoint) || 0));
 			const configuredMaxFrames = Math.max(1, Math.floor(Number(options.maxFrames) || 1));
 			const simulationLimit =
 				options.target === 'point' ? Math.max(configuredMaxFrames, pointMaxFrame + 1) : configuredMaxFrames;
@@ -4530,10 +4531,12 @@
 			let frames = 0;
 			let bestPointFrame = null;
 			let bestPointPosition = null;
+			let scoreCheckpoint = 0;
 			const samplePoint = () => {
 				if (options.target !== 'point') return;
 				const frame = gameFrame();
 				if (frame < pointMinFrame || frame > pointMaxFrame) return;
+				if (state.collectedCP < minCheckpoint) return;
 				const player = gmPlayer();
 				const x = Number(player && player.x);
 				const y = Number(player && player.y);
@@ -4545,6 +4548,7 @@
 					score = distance;
 					bestPointFrame = frame;
 					bestPointPosition = { x, y, z: 0 };
+					scoreCheckpoint = state.collectedCP;
 				}
 			};
 			samplePoint();
@@ -4558,11 +4562,13 @@
 				if (options.target === 'cp' && state.cpTimes[targetCP] != null && state.collectedCP >= targetCP) {
 					score = state.cpTimes[targetCP];
 					reached = true;
+					scoreCheckpoint = state.collectedCP;
 					break;
 				}
 				if (options.target === 'finish' && state.collectedCP >= finishCP) {
 					score = gameFrame();
 					reached = true;
+					scoreCheckpoint = state.collectedCP;
 					break;
 				}
 				if (options.target === 'point' && gameFrame() >= pointMaxFrame) break;
@@ -4578,6 +4584,7 @@
 				score,
 				reached,
 				cp: state.collectedCP,
+				scoreCheckpoint,
 				times: state.cpTimes.slice(),
 				bestFrame: bestPointFrame,
 				bestPosition: bestPointPosition,

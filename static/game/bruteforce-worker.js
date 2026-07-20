@@ -568,6 +568,7 @@
 			pointZ: current.settings.pointZ,
 			pointMinFrame: current.settings.pointMinFrame,
 			pointMaxFrame,
+			minCheckpoint: minimumCheckpoint(current.settings),
 			maxFrames:
 				current.settings.target === 'point'
 					? Math.max(finiteFrame(current.settings.maxFrames, 1), pointMaxFrame + 1)
@@ -584,6 +585,21 @@
 
 	function trial(script) {
 		return runLocalTrial(script, trialOptions());
+	}
+
+	function minimumCheckpoint(settings) {
+		return Math.max(0, finiteFrame(settings && settings.minCheckpoint, 0));
+	}
+
+	function checkpointAtScore(result) {
+		const scoreCheckpoint = Number(result && result.scoreCheckpoint);
+		return Number.isFinite(scoreCheckpoint)
+			? Math.max(0, Math.floor(scoreCheckpoint))
+			: Math.max(0, finiteFrame(result && result.cp, 0));
+	}
+
+	function conditionsMet(result, settings) {
+		return !!(result && result.reached) && checkpointAtScore(result) >= minimumCheckpoint(settings);
 	}
 
 	function scriptInputAtFrame(script, frame) {
@@ -1576,8 +1592,8 @@
 			bestReached: current.bestReached,
 			bestTimes: current.bestTimes,
 			bestScript: current.best,
-			lastScore: lastResult.score,
-			lastReached: lastResult.reached,
+			lastScore: conditionsMet(lastResult, current.settings) ? lastResult.score : Infinity,
+			lastReached: conditionsMet(lastResult, current.settings),
 			improvements: current.improvements,
 			rate: current.trials / elapsedSeconds,
 			mode: current.optimizer
@@ -1600,13 +1616,13 @@
 		let result = current.optimizer ? current.optimizer.evaluate(candidate) : trial(candidate);
 		current.trials += 1;
 
-		if (result.reached && result.score < current.bestScore) {
+		if (conditionsMet(result, current.settings) && result.score < current.bestScore) {
 			if (current.optimizer && !current.optimizer.restoreVerifier()) {
 				throw new Error('Failed to restore exact verification runtime');
 			}
 			const verified = trial(candidate);
 			current.verified += 1;
-			if (verified.reached && verified.score < current.bestScore) {
+			if (conditionsMet(verified, current.settings) && verified.score < current.bestScore) {
 				if (current.optimizer) {
 					if (!current.optimizer.rebuild(candidate)) {
 						throw new Error('Failed to rebuild deterministic rewind snapshots');
@@ -1678,6 +1694,7 @@
 				pointZ: settings.pointZ,
 				pointMinFrame: settings.pointMinFrame,
 				pointMaxFrame,
+				minCheckpoint: minimumCheckpoint(settings),
 				maxFrames:
 					settings.target === 'point'
 						? Math.max(finiteFrame(settings.maxFrames, 1), pointMaxFrame + 1)
@@ -1741,7 +1758,7 @@
 			if (!running || !current) return;
 			current.trials = 1;
 			current.verified = 1;
-			if (result.reached) {
+			if (conditionsMet(result, settings)) {
 				current.bestScore = result.score;
 				current.bestReached = true;
 				current.bestTimes = result.times || [];

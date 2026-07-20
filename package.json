@@ -11,6 +11,7 @@
 		"check": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json",
 		"check:determinism": "node scripts/verify-contact-determinism.mjs",
 		"check:engine-runtime": "node scripts/verify-engine-runtime.mjs",
+		"check:conditions": "node scripts/verify-bruteforce-conditions.mjs",
 		"check:mutations": "node scripts/verify-mutation-controls.mjs",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
 	},

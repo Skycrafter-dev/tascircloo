@@ -957,10 +957,11 @@
 		const snapshotFrame = Number.isFinite(requestedSnapshotFrame)
 			? Math.max(0, finiteFrame(requestedSnapshotFrame, 0))
 			: Math.max(0, prefixThroughFrame);
-		const maximumGameFrame = Math.max(
-			snapshotFrame,
-			finiteFrame(options && options.maxFrames, 1) - 1
-		);
+		const configuredMaximumGameFrame = finiteFrame(options && options.maxFrames, 1) - 1;
+		const targetMaximumGameFrame = pointTarget
+			? Math.max(0, finiteFrame(options && options.pointMaxFrame, configuredMaximumGameFrame))
+			: configuredMaximumGameFrame;
+		const maximumGameFrame = Math.max(snapshotFrame, targetMaximumGameFrame);
 		// Capture the complete reusable level model once. Some boundary growth and
 		// body-spawn patches occur after a short requested scoring window, but are
 		// still needed when a mutation reaches checkpoints on a different schedule.
@@ -1851,10 +1852,7 @@
 				pointMinFrame: settings.pointMinFrame,
 				pointMaxFrame,
 				minCheckpoint: minimumCheckpoint(settings),
-				maxFrames:
-					settings.target === 'point'
-						? Math.max(finiteFrame(settings.maxFrames, 1), pointMaxFrame + 1)
-						: settings.maxFrames,
+				maxFrames: settings.target === 'point' ? pointMaxFrame + 1 : settings.maxFrames,
 				warmup: settings.warmup,
 				seed: 0,
 				minFrame: settings.minFrame,

@@ -14,6 +14,54 @@ const standardBase = [
   { frame: 240, input: 'R' },
   { frame: 300, input: '.' }
 ];
+const level3LatePointBase = [
+  { frame: 0, input: 'U' },
+  { frame: 0, input: 'R' },
+  { frame: 19, input: 'L' },
+  { frame: 21, input: 'R' },
+  { frame: 28, input: 'LR' },
+  { frame: 29, input: 'R' },
+  { frame: 37, input: 'L' },
+  { frame: 84, input: 'R' },
+  { frame: 123, input: 'LR' },
+  { frame: 124, input: 'R' },
+  { frame: 127, input: '.' },
+  { frame: 154, input: 'R' },
+  { frame: 225, input: 'LR' },
+  { frame: 228, input: 'L' },
+  { frame: 308, input: '.' },
+  { frame: 333, input: 'R' },
+  { frame: 370, input: '.' },
+  { frame: 371, input: 'R' },
+  { frame: 383, input: 'L' },
+  { frame: 448, input: 'LR' },
+  { frame: 449, input: '.' },
+  { frame: 452, input: 'R' },
+  { frame: 455, input: 'L' },
+  { frame: 463, input: 'R' },
+  { frame: 479, input: '.' },
+  { frame: 489, input: 'R' },
+  { frame: 490, input: 'L' },
+  { frame: 499, input: 'R' },
+  { frame: 603, input: 'L' },
+  { frame: 685, input: 'LR' },
+  { frame: 693, input: 'L' },
+  { frame: 709, input: 'R' },
+  { frame: 771, input: 'L' },
+  { frame: 777, input: 'R' },
+  { frame: 792, input: 'L' },
+  { frame: 884, input: 'LR' },
+  { frame: 886, input: 'R' },
+  { frame: 1042, input: 'LR' },
+  { frame: 1046, input: 'L' },
+  { frame: 1161, input: 'R' },
+  { frame: 1164, input: 'L' },
+  { frame: 1193, input: '.' },
+  { frame: 1196, input: 'R' },
+  { frame: 1209, input: 'L' },
+  { frame: 1237, input: 'LR' },
+  { frame: 1240, input: '.' }
+];
 const scenarios = [
   { name: 'cp', target: 'cp', base: standardBase },
   { name: 'finish', target: 'finish', base: standardBase },
@@ -106,6 +154,28 @@ const scenarios = [
       removeMaxInputs: 1,
       alterMaxInputs: 2,
       alterTimeDifference: 3
+    }
+  },
+  {
+    name: 'point-level3-hidden-max-frames',
+    target: 'point',
+    levels: [3],
+    base: level3LatePointBase,
+    settings: {
+      pointX: 536.960656,
+      pointY: 2446.77249,
+      pointMinFrame: 1266,
+      pointMaxFrame: 1276,
+      minCheckpoint: 6,
+      // Point mode hides this old general setting. It must not extend the
+      // Point trial beyond pointMaxFrame.
+      maxFrames: 3600,
+      minFrame: 1150,
+      maxFrame: 1277,
+      addMaxInputs: 3,
+      removeMaxInputs: 1,
+      alterMaxInputs: 5,
+      alterTimeDifference: 8
     }
   }
 ];

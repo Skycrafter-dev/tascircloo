@@ -30,8 +30,10 @@
 	let current = null;
 	let startGeneration = 0;
 	let wasmRuntimePromise = null;
+	let wasmRuntimeError = null;
 	const PROGRESS_INTERVAL_MS = 200;
 	const BATCH_BUDGET_MS = 24;
+	const POINT_SCORE_TOLERANCE = 1e-9;
 
 	const noop = function () {};
 
@@ -565,7 +567,6 @@
 			finishCP: current.settings.finishCP,
 			pointX: current.settings.pointX,
 			pointY: current.settings.pointY,
-			pointZ: current.settings.pointZ,
 			pointMinFrame: current.settings.pointMinFrame,
 			pointMaxFrame,
 			minCheckpoint: minimumCheckpoint(current.settings),
@@ -650,17 +651,22 @@
 		if (!W.CirclooWasmRuntime) {
 			try {
 				importScripts(`/game/circloo-wasm-runtime.js?v=${encodeURIComponent(workerCacheBust)}`);
-			} catch {
+			} catch (error) {
+				wasmRuntimeError = error;
 				return Promise.resolve(null);
 			}
 		}
 		if (typeof W.CirclooWasmRuntime.create !== 'function') {
+			wasmRuntimeError = new Error('CirclooWasmRuntime.create is unavailable');
 			return Promise.resolve(null);
 		}
 		if (!wasmRuntimePromise) {
 			wasmRuntimePromise = W.CirclooWasmRuntime.create(
 				`/game/circloo-sim.wasm?v=${encodeURIComponent(workerCacheBust)}`
-			).catch(() => null);
+			).catch((error) => {
+				wasmRuntimeError = error;
+				return null;
+			});
 		}
 		return wasmRuntimePromise;
 	}
@@ -675,23 +681,21 @@
 		);
 	}
 
-	function wasmTrialResult(result, snapshotFrame, target) {
+	function wasmTrialResult(result, snapshotFrame, checkpointTarget) {
 		const checkpointFrames = Array.isArray(result && result.checkpointFrames)
 			? result.checkpointFrames.map((frame) => (Number(frame) >= 0 ? Number(frame) : null))
 			: [];
 		const checkpoint = Math.max(0, finiteFrame(result && result.checkpoint, 0));
-		const reached = !!(result && result.reached);
+		const targetFrame = Number(checkpointFrames[checkpointTarget]);
+		const reached = checkpoint >= checkpointTarget && Number.isFinite(targetFrame);
 		const frame = finiteFrame(result && result.frame, snapshotFrame);
-		const score = reached
-			? target === 'cp'
-				? Number(checkpointFrames[checkpoint])
-				: frame
-			: Infinity;
+		const reportedCheckpoint = reached ? checkpointTarget : checkpoint;
 		return {
 			reached,
-			score,
-			cp: checkpoint,
-			times: checkpoint > 0 ? checkpointFrames.slice(0, checkpoint + 1) : [],
+			score: reached ? targetFrame : Infinity,
+			cp: reportedCheckpoint,
+			scoreCheckpoint: reached ? checkpointTarget : 0,
+			times: reportedCheckpoint > 0 ? checkpointFrames.slice(0, reportedCheckpoint + 1) : [],
 			debug: {
 				trialMs: 0,
 				prepareMs: 0,
@@ -926,9 +930,6 @@
 	}
 
 	async function createWasmSearchOptimizer(base, options, settings) {
-		if (options && options.target === 'point') {
-			return { optimizer: null, reason: 'point-target-full-runtime' };
-		}
 		if (typeof W.__circlooTasCaptureWasmRuntimeModel !== 'function') {
 			return { optimizer: null, reason: 'wasm-unavailable' };
 		}
@@ -937,18 +938,30 @@
 			!runtime ||
 			!W.CirclooWasmRuntime ||
 			typeof W.CirclooWasmRuntime.modelFromInspection !== 'function'
-		) return { optimizer: null, reason: 'wasm-load-failed' };
-
-		const minimumMutationFrame = Math.max(0, finiteFrame(settings && settings.minFrame, 0));
-		if (minimumMutationFrame < 1) {
-			return { optimizer: null, reason: 'wasm-requires-prior-frame' };
+		) {
+			const detail = wasmRuntimeError
+				? String(wasmRuntimeError && wasmRuntimeError.message ? wasmRuntimeError.message : wasmRuntimeError)
+				: '';
+			return { optimizer: null, reason: detail ? `wasm-load-failed:${detail}` : 'wasm-load-failed' };
 		}
-		const snapshotFrame = minimumMutationFrame - 1;
+
+		const pointTarget = options && options.target === 'point';
+		const minimumMutationFrame = Math.max(0, finiteFrame(settings && settings.minFrame, 0));
+		const prefixThroughFrame = minimumMutationFrame - 1;
+		const requestedSnapshotFrame = Number(settings && settings.wasmSnapshotFrame);
+		const snapshotFrame = Number.isFinite(requestedSnapshotFrame)
+			? Math.max(0, finiteFrame(requestedSnapshotFrame, 0))
+			: Math.max(0, prefixThroughFrame);
 		const maximumGameFrame = Math.max(
 			snapshotFrame,
 			finiteFrame(options && options.maxFrames, 1) - 1
 		);
-		const checkpointTarget = targetCheckpoint(options);
+		// Capture the complete reusable level model once. Some boundary growth and
+		// body-spawn patches occur after a short requested scoring window, but are
+		// still needed when a mutation reaches checkpoints on a different schedule.
+		// Individual WASM trials continue to stop at maximumGameFrame.
+		const modelCaptureEndFrame = Math.max(maximumGameFrame, 899);
+		const checkpointTarget = pointTarget ? 32 : targetCheckpoint(options);
 		const startedAt = realNow();
 		const capture = W.__circlooTasCaptureWasmRuntimeModel(
 			normalizeScript(base),
@@ -958,7 +971,7 @@
 				captureReferenceFrames: !!(settings && settings.verifyEveryFrame)
 			},
 			snapshotFrame,
-			maximumGameFrame
+			modelCaptureEndFrame
 		);
 		if (!capture || !capture.inspection || !Array.isArray(capture.inspection.bodies)) {
 			return { optimizer: null, reason: 'wasm-capture-failed' };
@@ -978,21 +991,28 @@
 				reason: `wasm-unsupported:${model.unsupportedReasons.join(',')}`
 			};
 		}
-		if (model.lifecycle.initialCheckpoint >= checkpointTarget) {
-			return { optimizer: null, reason: 'target-before-mutation-window' };
-		}
+		const capturedCheckpoint = Array.isArray(capture.times)
+			? capture.times.reduce(
+					(highest, value, index) =>
+						Number.isFinite(Number(value)) ? Math.max(highest, index) : highest,
+					Math.max(0, finiteFrame(model.lifecycle.initialCheckpoint, 0))
+				)
+			: Math.max(0, finiteFrame(model.lifecycle.initialCheckpoint, 0));
+		const requiredCheckpoint = pointTarget ? capturedCheckpoint : checkpointTarget;
 		const requiredGrowthPatches = Math.max(
 			0,
-			checkpointTarget - model.lifecycle.initialCheckpoint - 1
+			requiredCheckpoint - model.lifecycle.initialCheckpoint - 1
 		);
-		if (!debugWasmParity && (model.growthPatches || []).length < requiredGrowthPatches) {
-			return { optimizer: null, reason: 'wasm-incomplete-growth-model' };
-		}
+		const capturedGrowthPatches = (model.growthPatches || []).length;
+		const growthModelComplete = capturedGrowthPatches >= requiredGrowthPatches;
 
 		let modelDebug = null;
 		try {
 			modelDebug = {
 				...runtime.loadModel(model),
+				growthModelComplete,
+				requiredGrowthPatches,
+				capturedGrowthPatches,
 				bodyUpdateEvents: capture.bodyUpdateEvents,
 				frameBodyUpdates: (model.framePatches || []).map((patch) => ({
 					frame: patch.frame,
@@ -1006,44 +1026,151 @@
 			};
 		}
 
-		const prefixKey = scriptPrefixKey(base, snapshotFrame);
+		const prefixKey = scriptPrefixKey(base, prefixThroughFrame);
 		let baseScript = normalizeScript(base);
+		const pointMinFrame = Math.max(0, finiteFrame(options && options.pointMinFrame, 0));
+		const pointMaxFrame = Math.max(
+			pointMinFrame,
+			finiteFrame(options && options.pointMaxFrame, maximumGameFrame)
+		);
+		const pointX = Number.isFinite(Number(options && options.pointX)) ? Number(options.pointX) : 0;
+		const pointY = Number.isFinite(Number(options && options.pointY)) ? Number(options.pointY) : 0;
+		const pointMinCheckpoint = Math.max(0, finiteFrame(options && options.minCheckpoint, 0));
+		const worldScale = Number(model && model.world && model.world.scale);
+		if (pointTarget && (!Number.isFinite(worldScale) || worldScale === 0)) {
+			return { optimizer: null, reason: 'wasm-invalid-world-scale' };
+		}
+		const prefixPointLastFrame = Math.min(snapshotFrame, pointMaxFrame);
+		const prefixPointResult =
+			pointTarget && pointMinFrame <= prefixPointLastFrame
+				? runLocalTrial(baseScript, {
+						...options,
+						pointMaxFrame: prefixPointLastFrame,
+						maxFrames: prefixPointLastFrame + 1
+					})
+				: null;
 		const buildMs = realNow() - startedAt;
 
 		function prefixMatches(candidate) {
-			return scriptPrefixKey(candidate, snapshotFrame) === prefixKey;
+			return scriptPrefixKey(candidate, prefixThroughFrame) === prefixKey;
+		}
+
+		function incompatiblePrefixResult() {
+			return {
+				reached: false,
+				score: Infinity,
+				cp: model.lifecycle.initialCheckpoint,
+				scoreCheckpoint: 0,
+				times:
+					model.lifecycle.initialCheckpoint > 0
+						? (model.lifecycle.checkpointFrames || []).slice(
+								0,
+								model.lifecycle.initialCheckpoint + 1
+							)
+						: [],
+				debug: {
+					trialMs: 0,
+					prepareMs: 0,
+					pumpMs: 0,
+					frames: 0,
+					prepPumps: 0,
+					rewindFrame: snapshotFrame,
+					wasm: true,
+					incompatiblePrefix: true
+				}
+			};
+		}
+
+		function createPointTracker() {
+			return {
+				reached: !!(prefixPointResult && prefixPointResult.reached),
+				score:
+					prefixPointResult && prefixPointResult.reached
+						? Number(prefixPointResult.score)
+						: Infinity,
+				bestFrame:
+					prefixPointResult && Number.isFinite(Number(prefixPointResult.bestFrame))
+						? Number(prefixPointResult.bestFrame)
+						: null,
+				bestPosition:
+					prefixPointResult && prefixPointResult.bestPosition
+						? {
+								x: Number(prefixPointResult.bestPosition.x),
+								y: Number(prefixPointResult.bestPosition.y)
+							}
+						: null,
+				scoreCheckpoint:
+					prefixPointResult && prefixPointResult.reached
+						? checkpointAtScore(prefixPointResult)
+						: 0
+			};
+		}
+
+		function sampleWasmPoint(raw, tracker) {
+			const frame = finiteFrame(raw && raw.frame, snapshotFrame);
+			const checkpoint = Math.max(0, finiteFrame(raw && raw.checkpoint, 0));
+			if (frame < pointMinFrame || frame > pointMaxFrame || checkpoint < pointMinCheckpoint) return;
+			const x = Number(raw && raw.x) / worldScale;
+			const y = Number(raw && raw.y) / worldScale;
+			if (!Number.isFinite(x) || !Number.isFinite(y)) return;
+			const distance = Math.hypot(x - pointX, y - pointY);
+			if (!Number.isFinite(distance)) return;
+			if (
+				!tracker.reached ||
+				distance < tracker.score ||
+				(distance === tracker.score && (tracker.bestFrame === null || frame < tracker.bestFrame))
+			) {
+				tracker.reached = true;
+				tracker.score = distance;
+				tracker.bestFrame = frame;
+				tracker.bestPosition = { x, y };
+				tracker.scoreCheckpoint = checkpoint;
+			}
+		}
+
+		function pointWasmTrialResult(raw, tracker) {
+			const converted = wasmTrialResult(raw, snapshotFrame, 32);
+			converted.reached = tracker.reached;
+			converted.score = tracker.reached ? tracker.score : Infinity;
+			converted.scoreCheckpoint = tracker.reached ? tracker.scoreCheckpoint : 0;
+			converted.bestFrame = tracker.bestFrame;
+			converted.bestPosition = tracker.bestPosition ? { ...tracker.bestPosition } : null;
+			return converted;
+		}
+
+		function evaluatePointThrough(candidateScript, lastGameFrame, includePhysics = false) {
+			const inputs = encodeScriptInputs(
+				candidateScript,
+				snapshotFrame + 1,
+				lastGameFrame
+			);
+			const tracker = createPointTracker();
+			const trialStarted = realNow();
+			let raw = null;
+			try {
+				raw = runtime.beginSequence(includePhysics);
+				for (let index = 0; index < inputs.length; index += 1) {
+					raw = runtime.stepSequence(inputs[index], 32, includePhysics);
+					sampleWasmPoint(raw, tracker);
+				}
+			} finally {
+				runtime.endSequence();
+			}
+			const elapsed = realNow() - trialStarted;
+			const converted = pointWasmTrialResult(raw, tracker);
+			converted.debug.trialMs = elapsed;
+			converted.debug.pumpMs = elapsed;
+			return converted;
 		}
 
 		function evaluateWasmThrough(candidate, requestedLastGameFrame = maximumGameFrame) {
 			const candidateScript = normalizeScript(candidate);
-			if (!prefixMatches(candidateScript)) {
-				return {
-					reached: false,
-					score: Infinity,
-					cp: model.lifecycle.initialCheckpoint,
-					times:
-						model.lifecycle.initialCheckpoint > 0
-							? (model.lifecycle.checkpointFrames || []).slice(
-									0,
-									model.lifecycle.initialCheckpoint + 1
-								)
-							: [],
-					debug: {
-						trialMs: 0,
-						prepareMs: 0,
-						pumpMs: 0,
-						frames: 0,
-						prepPumps: 0,
-						rewindFrame: snapshotFrame,
-						wasm: true,
-						incompatiblePrefix: true
-					}
-				};
-			}
+			if (!prefixMatches(candidateScript)) return incompatiblePrefixResult();
 			const lastGameFrame = Math.max(
 				snapshotFrame,
 				Math.min(maximumGameFrame, finiteFrame(requestedLastGameFrame, maximumGameFrame))
 			);
+			if (pointTarget) return evaluatePointThrough(candidateScript, lastGameFrame, false);
 			const inputs = encodeScriptInputs(
 				candidateScript,
 				snapshotFrame + 1,
@@ -1052,7 +1179,7 @@
 			const trialStarted = realNow();
 			const raw = runtime.simulate(inputs, checkpointTarget);
 			const elapsed = realNow() - trialStarted;
-			const converted = wasmTrialResult(raw, snapshotFrame, options.target);
+			const converted = wasmTrialResult(raw, snapshotFrame, checkpointTarget);
 			converted.debug.trialMs = elapsed;
 			converted.debug.pumpMs = elapsed;
 			return converted;
@@ -1070,11 +1197,15 @@
 				snapshotFrame + 1,
 				maximumGameFrame
 			);
-			const raw = runtime.beginSequence();
+			const raw = runtime.beginSequence(true);
+			const pointTracker = pointTarget ? createPointTracker() : null;
 			return {
 				inputs,
 				nextInputIndex: 0,
-				result: wasmTrialResult(raw, snapshotFrame, options.target)
+				pointTracker,
+				result: pointTarget
+					? pointWasmTrialResult(raw, pointTracker)
+					: wasmTrialResult(raw, snapshotFrame, checkpointTarget)
 			};
 		}
 
@@ -1084,10 +1215,16 @@
 			}
 			const raw = runtime.stepSequence(
 				sequence.inputs[sequence.nextInputIndex],
-				checkpointTarget
+				checkpointTarget,
+				true
 			);
 			sequence.nextInputIndex += 1;
-			sequence.result = wasmTrialResult(raw, snapshotFrame, options.target);
+			if (pointTarget) {
+				sampleWasmPoint(raw, sequence.pointTracker);
+				sequence.result = pointWasmTrialResult(raw, sequence.pointTracker);
+			} else {
+				sequence.result = wasmTrialResult(raw, snapshotFrame, checkpointTarget);
+			}
 			return sequence.result;
 		}
 
@@ -1112,6 +1249,7 @@
 				},
 				scoreOnlyValidation: true,
 				modelDebug,
+				snapshotStrategy: snapshotFrame === 0 ? 'full-level' : 'mutation-window',
 				referenceFrames: Array.isArray(capture.referenceFrames)
 					? capture.referenceFrames
 					: [],
@@ -1189,6 +1327,33 @@
 		};
 	}
 
+	function trialResultsMatch(fastResult, exactResult, target) {
+		const fast = comparableTrialResult(fastResult);
+		const exact = comparableTrialResult(exactResult);
+		if (
+			fast.reached !== exact.reached ||
+			fast.cp !== exact.cp ||
+			JSON.stringify(fast.times) !== JSON.stringify(exact.times)
+		) {
+			return false;
+		}
+		if (target !== 'point') return fast.score === exact.score;
+		if (!fast.reached) return !Number.isFinite(fast.score) && !Number.isFinite(exact.score);
+		if (
+			!Number.isFinite(fast.score) ||
+			!Number.isFinite(exact.score) ||
+			Math.abs(fast.score - exact.score) > POINT_SCORE_TOLERANCE
+		) {
+			return false;
+		}
+		const fastFrame = Number(fastResult && fastResult.bestFrame);
+		const exactFrame = Number(exactResult && exactResult.bestFrame);
+		const bestFrameMatches =
+			(Number.isFinite(fastFrame) && Number.isFinite(exactFrame) && fastFrame === exactFrame) ||
+			(!Number.isFinite(fastFrame) && !Number.isFinite(exactFrame));
+		return bestFrameMatches && checkpointAtScore(fastResult) === checkpointAtScore(exactResult);
+	}
+
 	function determinismDigestText() {
 		if (typeof W.__circlooTasDeterminismDigest !== 'function') return null;
 		return JSON.stringify(W.__circlooTasDeterminismDigest());
@@ -1196,7 +1361,11 @@
 
 	function validateSearchOptimizer(optimizer, base, options, settings) {
 		if (!optimizer) return { optimizer: null, validated: false, reason: 'unavailable' };
-		for (const candidate of validationCandidates(base, settings)) {
+		const validationRuns = [
+			{ candidate: normalizeScript(base), required: true },
+			...validationCandidates(base, settings).map((candidate) => ({ candidate, required: false }))
+		];
+		for (const { candidate, required } of validationRuns) {
 			const stateBacked = optimizer.stateBacked(candidate);
 			const fastResult = optimizer.evaluate(candidate);
 			const fast = comparableTrialResult(fastResult);
@@ -1210,7 +1379,19 @@
 			}
 			const exactResult = runLocalTrial(candidate, options);
 			const exact = comparableTrialResult(exactResult);
-			const resultMatches = JSON.stringify(fast) === JSON.stringify(exact);
+			const strictResultMatches = trialResultsMatch(
+				fastResult,
+				exactResult,
+				options && options.target
+			);
+			const resultMatches = strictResultMatches || !required;
+			if (!required && !strictResultMatches) {
+				console.warn('[Circloo TAS] WASM heuristic probe differs from exact replay', {
+					candidate,
+					fast,
+					exact
+				});
+			}
 			const stateMatches = !stateBacked || (fastDigest !== null && fastDigest === determinismDigestText());
 			const signatureMatches =
 				optimizer.scoreOnlyValidation ||
@@ -1241,85 +1422,6 @@
 		}
 		return { optimizer, validated: true, reason: '' };
 	}
-	function createSearchOptimizer(base, options, settings) {
-		if (options && options.target === 'point') return null;
-		const finishSeven =
-			typeof W.__circlooTasCreateFinishSevenOptimizer === 'function'
-				? W.__circlooTasCreateFinishSevenOptimizer(base, options)
-				: null;
-		const suffix =
-			!finishSeven &&
-			typeof W.__circlooTasCreateAdaptiveFinishOptimizer === 'function'
-				? W.__circlooTasCreateAdaptiveFinishOptimizer(base, options)
-				: null;
-		const minimumMutationFrame = Math.max(0, finiteFrame(settings && settings.minFrame, 0));
-		const dynamic =
-			(!finishSeven || minimumMutationFrame < finishSeven.resumeFrame) &&
-			(!suffix || minimumMutationFrame < suffix.resumeFrame) &&
-			typeof W.__circlooTasCreateDynamicFinishOptimizer === 'function'
-				? W.__circlooTasCreateDynamicFinishOptimizer(base, options)
-				: null;
-		if (!finishSeven && !suffix && !dynamic) return null;
-
-		let lastRewindFrame = finishSeven
-			? finishSeven.resumeFrame
-			: suffix
-				? suffix.resumeFrame
-				: dynamic
-					? dynamic.rewindFrame
-					: null;
-		return {
-			get rewindFrame() {
-				return lastRewindFrame;
-			},
-			get snapshotCount() {
-				return (
-					(finishSeven ? finishSeven.snapshotCount : 0) +
-					(suffix ? suffix.snapshotCount : 0) +
-					(dynamic ? dynamic.snapshotCount : 0)
-				);
-			},
-			get buildMs() {
-				return (
-					(finishSeven ? finishSeven.buildMs : 0) +
-					(suffix ? suffix.buildMs : 0) +
-					(dynamic ? dynamic.buildMs : 0)
-				);
-			},
-			stateBacked(candidate) {
-				return (
-					!!dynamic &&
-					(!finishSeven || !finishSeven.prefixMatches(candidate)) &&
-					(!suffix || !suffix.prefixMatches(candidate))
-				);
-			},
-			evaluate(candidate) {
-				let result;
-				if (finishSeven && finishSeven.prefixMatches(candidate)) result = finishSeven.evaluate(candidate);
-				else if (suffix && suffix.prefixMatches(candidate)) result = suffix.evaluate(candidate);
-				else if (dynamic) result = dynamic.evaluate(candidate);
-				else if (finishSeven) result = finishSeven.evaluate(candidate);
-				else result = suffix.evaluate(candidate);
-				if (result && result.debug && Number.isFinite(Number(result.debug.rewindFrame))) {
-					lastRewindFrame = Number(result.debug.rewindFrame);
-				}
-				return result;
-			},
-			restoreVerifier() {
-				return dynamic && typeof dynamic.restoreVerifier === 'function'
-					? dynamic.restoreVerifier()
-					: true;
-			},
-			rebuild(nextBase) {
-				let rebuilt = true;
-				if (finishSeven) rebuilt = finishSeven.rebuild(nextBase) && rebuilt;
-				if (suffix) rebuilt = suffix.rebuild(nextBase) && rebuilt;
-				if (dynamic) rebuilt = dynamic.rebuild(nextBase) && rebuilt;
-				return rebuilt;
-			}
-		};
-	}
-
 	function runTrialRequest(message) {
 		if (!runtimeReady) {
 			pendingTrial = message;
@@ -1596,9 +1698,7 @@
 			lastReached: conditionsMet(lastResult, current.settings),
 			improvements: current.improvements,
 			rate: current.trials / elapsedSeconds,
-			mode: current.optimizer
-				? current.optimizer.mode || 'deterministic-rewind'
-				: 'full-runtime',
+			mode: current.optimizer.mode || 'wasm-runtime',
 			rewindFrame: current.optimizer ? current.optimizer.rewindFrame : null,
 			snapshotCount: current.optimizer ? current.optimizer.snapshotCount : 0,
 			optimizerBuildMs: current.optimizer ? current.optimizer.buildMs : 0,
@@ -1613,10 +1713,14 @@
 	function runOne() {
 		if (!running || !current) return;
 		const candidate = mutateScript(current.best, current.searchSettings, nextRandom);
-		let result = current.optimizer ? current.optimizer.evaluate(candidate) : trial(candidate);
+		let result = current.optimizer.evaluate(candidate);
 		current.trials += 1;
 
-		if (conditionsMet(result, current.settings) && result.score < current.bestScore) {
+		const pointTolerance = current.settings.target === 'point' ? POINT_SCORE_TOLERANCE : 0;
+		if (
+			conditionsMet(result, current.settings) &&
+			result.score < current.bestScore + pointTolerance
+		) {
 			if (current.optimizer && !current.optimizer.restoreVerifier()) {
 				throw new Error('Failed to restore exact verification runtime');
 			}
@@ -1633,6 +1737,9 @@
 						trialOptions(),
 						current.settings
 					);
+					if (!optimizerCheck.optimizer) {
+						throw new Error(`Custom WASM engine validation failed: ${optimizerCheck.reason || 'unknown'}`);
+					}
 					current.optimizer = optimizerCheck.optimizer;
 					current.optimizerValidated = optimizerCheck.validated;
 					current.optimizerFallbackReason = optimizerCheck.reason;
@@ -1691,7 +1798,6 @@
 				finishCP: settings.finishCP,
 				pointX: settings.pointX,
 				pointY: settings.pointY,
-				pointZ: settings.pointZ,
 				pointMinFrame: settings.pointMinFrame,
 				pointMaxFrame,
 				minCheckpoint: minimumCheckpoint(settings),
@@ -1708,27 +1814,25 @@
 			const workerId = Math.max(0, finiteFrame(message.workerId, 0));
 			const startedAt = realNow();
 			const baseResult = runLocalTrial(base, options);
-			let optimizerCheck;
-			let wasmFallbackReason = '';
-			if (message.forceFullRuntime) {
-				optimizerCheck = { optimizer: null, validated: false, reason: 'pool-fallback' };
-			} else {
-				const wasmBuild = await createWasmSearchOptimizer(base, options, settings);
+			let wasmBuild = await createWasmSearchOptimizer(base, options, settings);
+			if (generation !== startGeneration) return;
+			let optimizerCheck = wasmBuild.optimizer
+				? validateSearchOptimizer(wasmBuild.optimizer, base, options, settings)
+				: { optimizer: null, validated: false, reason: wasmBuild.reason };
+			if (!optimizerCheck.optimizer && Math.max(0, finiteFrame(settings.minFrame, 0)) > 0) {
+				wasmBuild = await createWasmSearchOptimizer(base, options, {
+					...settings,
+					wasmSnapshotFrame: 0
+				});
 				if (generation !== startGeneration) return;
 				optimizerCheck = wasmBuild.optimizer
 					? validateSearchOptimizer(wasmBuild.optimizer, base, options, settings)
 					: { optimizer: null, validated: false, reason: wasmBuild.reason };
-				wasmFallbackReason = optimizerCheck.optimizer ? '' : optimizerCheck.reason;
-				if (!optimizerCheck.optimizer) {
-					const fallback = createSearchOptimizer(base, options, settings);
-					const fallbackCheck = validateSearchOptimizer(fallback, base, options, settings);
-					if (fallbackCheck.optimizer) optimizerCheck = fallbackCheck;
-					else if (!optimizerCheck.reason || optimizerCheck.reason === 'unavailable') {
-						optimizerCheck = fallbackCheck;
-					}
-				}
 			}
 			if (generation !== startGeneration) return;
+			if (!optimizerCheck.optimizer) {
+				throw new Error(`Custom WASM engine unavailable: ${optimizerCheck.reason || 'unknown'}`);
+			}
 			const optimizer = optimizerCheck.optimizer;
 			const searchSettings = { ...settings };
 
@@ -1740,7 +1844,7 @@
 				optimizer,
 				optimizerValidated: optimizerCheck.validated,
 				optimizerFallbackReason: optimizerCheck.reason,
-				wasmFallbackReason,
+				wasmFallbackReason: '',
 				best: base,
 				bestScore: Infinity,
 				bestReached: false,

@@ -550,12 +550,15 @@ void RuntimeSimulator::ApplyBodyUpdate(const ModelBodyUpdate& update) {
         body->SetAwake(update.awake);
         return;
     }
-    InvalidModel();
+    // Timeline patches are captured from the current best run. A mutated
+    // candidate can legitimately destroy or fail to spawn that body before the
+    // captured update frame. Skip the stale update and let exact GameMaker
+    // verification decide whether a candidate that appears better is valid.
 }
 
 void RuntimeSimulator::ApplyBodyStateUpdate(const ModelBodyStateUpdate& update) {
     b2Body* body = FindBodyByInstanceId(update.instance_id);
-    if (!body) InvalidModel();
+    if (!body) return;
     body->SetTransform(
         b2Vec2(update.position.x, update.position.y),
         update.angle
@@ -646,12 +649,11 @@ void RuntimeSimulator::CollectCurrentPosition() {
         double collectible_y = collectible.y_pixels;
         if (collectible.body_index >= 0) {
             const std::size_t body_index = static_cast<std::size_t>(collectible.body_index);
-            if (body_index >= initial_bodies_.size() || !initial_bodies_[body_index]) {
-                InvalidModel();
+            if (body_index < initial_bodies_.size() && initial_bodies_[body_index]) {
+                const b2Vec2 position = initial_bodies_[body_index]->GetPosition();
+                collectible_x = position.x * inverse_scale;
+                collectible_y = position.y * inverse_scale;
             }
-            const b2Vec2 position = initial_bodies_[body_index]->GetPosition();
-            collectible_x = position.x * inverse_scale;
-            collectible_y = position.y * inverse_scale;
         }
 
         const double dx = collectible_x - player_x_pixels;

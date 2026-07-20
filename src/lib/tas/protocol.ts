@@ -78,7 +78,6 @@ export type GameMessage =
 			source: 'circloo-tas-game';
 			x: number;
 			y: number;
-			z: number;
 	  }
 	| { type: 'ERROR'; source: 'circloo-tas-game'; message: string; requestId?: number | null };
 
@@ -97,7 +96,6 @@ export type BruteforceSettings = {
 	finishCP: number;
 	pointX: number;
 	pointY: number;
-	pointZ: number;
 	pointMinFrame: number;
 	pointMaxFrame: number;
 	minCheckpoint: number;

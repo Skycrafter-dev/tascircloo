@@ -16,25 +16,25 @@ The runtime model is not tied to a level number. It supports:
 - collectible checkpoints;
 - delayed boundary replacement and body-spawn patches.
 
-Unsupported captured mechanics are rejected before search and retain the
-GameMaker full-runtime path.
+Bruteforce search is WASM-only. If a level model cannot be created or validated,
+the worker reports an explicit startup error instead of silently switching to a
+slower GameMaker or JavaScript search path.
 
 ## Correctness contract
 
 The Level 1 reference fixture is a regression oracle. The native simulator
 matches its captured GameMaker state through frame 658 with zero ULP error.
 
-For production search, Wasm is selected only after representative candidates
-match GameMaker on reached status, score, checkpoint count, and every
-checkpoint frame. Every candidate that could improve the current best is then
-replayed in the original GameMaker runtime before it is accepted. Continuous
-floating-point tail state is diagnostic rather than an acceptance condition,
-because independent GameMaker replays can differ at approximately 1e-13 while
-producing identical checkpoint results.
+The current best trajectory must match GameMaker before its WASM model is used.
+Checkpoint, finish, and point searches then execute entirely in WASM. Point
+searches score two-dimensional X/Y distance frame by frame. Highly divergent
+mutation probes can depart from the captured model and are treated as fast
+heuristics for every target type. Every candidate that could improve the current
+best is replayed in the original GameMaker runtime, and only that exact result
+can be accepted.
 
-The all-level production classifier currently validates the custom runtime on
-all 20 levels: Level 1 selects deterministic rewind and Levels 2 through 20
-select Wasm.
+The all-level target-mode matrix verifies `wasm-runtime` on all 20 levels for
+checkpoint, finish, and point searches: 60 combinations total.
 
 ## Build and test
 
@@ -67,6 +67,9 @@ CDP_PORT=9440 RUNS=3 TRIALS=2000 \
 
 CDP_PORT=9440 \
   node native/circloo-sim/tools/test_all_level_checkpoints.mjs
+
+CDP_PORT=9440 \
+  node native/circloo-sim/tools/test_all_level_target_modes.mjs
 ```
 
 The benchmark uses the same UI and adaptive worker pool as production:

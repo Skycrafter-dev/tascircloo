@@ -38,7 +38,6 @@
 		finishCP: 6,
 		pointX: 1500,
 		pointY: 1670,
-		pointZ: 0,
 		pointMinFrame: 0,
 		pointMaxFrame: 520,
 		minCheckpoint: 0,
@@ -66,7 +65,6 @@
 	let bruteforceWorkers: BruteforceWorkerSlot[] = [];
 	let nextBruteforceWorkerId = 0;
 	let bruteforceGeneration = 0;
-	let poolForceFullRuntime = false;
 	let retiredTrials = 0;
 	let gameRevision = $state(0);
 	let volume = $state(0.8);
@@ -116,7 +114,6 @@
 	const finishCPNumber = $derived(Math.max(1, Math.floor(Number(settings.finishCP) || 1)));
 	const pointXNumber = $derived(Number.isFinite(Number(settings.pointX)) ? Number(settings.pointX) : 0);
 	const pointYNumber = $derived(Number.isFinite(Number(settings.pointY)) ? Number(settings.pointY) : 0);
-	const pointZNumber = $derived(Number.isFinite(Number(settings.pointZ)) ? Number(settings.pointZ) : 0);
 	const pointMinFrameNumber = $derived(Math.max(0, Math.floor(Number(settings.pointMinFrame) || 0)));
 	const pointMaxFrameNumber = $derived(
 		Math.max(pointMinFrameNumber, Math.floor(Number(settings.pointMaxFrame) || pointMinFrameNumber))
@@ -143,7 +140,7 @@
 			? `Checkpoint ${targetCPNumber}`
 			: settings.target === 'finish'
 				? `Finish at CP ${finishCPNumber}`
-				: `Point (${formatCoordinate(pointXNumber)}, ${formatCoordinate(pointYNumber)}, ${formatCoordinate(pointZNumber)}) · frames ${pointMinFrameNumber}–${pointMaxFrameNumber}`
+				: `Point (${formatCoordinate(pointXNumber)}, ${formatCoordinate(pointYNumber)}) · frames ${pointMinFrameNumber}–${pointMaxFrameNumber}`
 	);
 	const checkpointRows = $derived(
 		Array.from({ length: finishCPNumber }, (_, index) => {
@@ -385,7 +382,6 @@
 			finishCP: integer(source.finishCP, defaultBruteforceSettings.finishCP, 1),
 			pointX: finite(source.pointX, defaultBruteforceSettings.pointX),
 			pointY: finite(source.pointY, defaultBruteforceSettings.pointY),
-			pointZ: finite(source.pointZ, defaultBruteforceSettings.pointZ),
 			pointMinFrame,
 			pointMaxFrame: Math.max(
 				pointMinFrame,
@@ -520,7 +516,6 @@
 				base,
 				level,
 				workerId: id,
-				forceFullRuntime: poolForceFullRuntime,
 				settings: { ...workerSettings }
 			})
 		);
@@ -542,9 +537,6 @@
 				break;
 			case 'BRUTEFORCE_PROGRESS':
 				slot.progress = message;
-				if (message.optimizerFallbackReason && message.optimizerFallbackReason !== 'unavailable') {
-					poolForceFullRuntime = true;
-				}
 				aggregateBruteforce(message);
 				break;
 			case 'BRUTEFORCE_STOPPED':
@@ -646,7 +638,6 @@
 		bruteforce.scaling = true;
 		bruteforce.lastError = '';
 		retiredTrials = 0;
-		poolForceFullRuntime = false;
 		nextBruteforceWorkerId = 0;
 		const generation = ++bruteforceGeneration;
 		const level = bruteforceLevel();
@@ -678,7 +669,6 @@
 			enabled: pointPickAvailable,
 			x: pointXNumber,
 			y: pointYNumber,
-			z: pointZNumber,
 			picking: pointPickAvailable && pointPicking
 		});
 	}
@@ -691,8 +681,7 @@
 		pointPicking = !pointPicking;
 		postToGame(pointPicking ? 'START_POINT_PICK' : 'CANCEL_POINT_PICK', {
 			x: pointXNumber,
-			y: pointYNumber,
-			z: pointZNumber
+			y: pointYNumber
 		});
 	}
 
@@ -745,10 +734,9 @@
 			}
 			case 'POINT_TARGET_PICKED':
 				if (!pointPicking || settings.target !== 'point') break;
-				if (![message.x, message.y, message.z].every(Number.isFinite)) break;
+				if (![message.x, message.y].every(Number.isFinite)) break;
 				settings.pointX = message.x;
 				settings.pointY = message.y;
-				settings.pointZ = message.z;
 				pointPicking = false;
 				saveSettings();
 				showToast('Point target selected');
@@ -966,10 +954,6 @@
 								<label>
 									<span class="setting-label">Y</span>
 									<input type="number" step="any" bind:value={settings.pointY} oninput={handlePointCoordinateInput} />
-								</label>
-								<label>
-									<span class="setting-label">Z</span>
-									<input type="number" step="any" bind:value={settings.pointZ} oninput={handlePointCoordinateInput} />
 								</label>
 								<label>
 									<span class="setting-label">Min frame</span>

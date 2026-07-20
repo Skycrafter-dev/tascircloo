@@ -107,7 +107,7 @@
 		activeRun: null,
 		canonicalStage: 'idle',
 		runRequestSequence: 0,
-		pointTarget: { enabled: false, picking: false, x: 0, y: 0, z: 0 },
+		pointTarget: { enabled: false, picking: false, x: 0, y: 0 },
 		pointMarker: null
 	};
 	let canonicalRetryTimer = null;
@@ -780,7 +780,7 @@
 	function setPointTarget(message) {
 		state.pointTarget.enabled = !!message.enabled;
 		state.pointTarget.picking = !!message.picking && state.pointTarget.enabled;
-		for (const key of ['x', 'y', 'z']) {
+		for (const key of ['x', 'y']) {
 			const value = Number(message[key]);
 			if (Number.isFinite(value)) state.pointTarget[key] = value;
 		}
@@ -807,8 +807,7 @@
 		}
 		return {
 			x: transform.viewX + ((canvasX - transform.portX) / transform.portWidth) * transform.viewWidth,
-			y: transform.viewY + ((canvasY - transform.portY) / transform.portHeight) * transform.viewHeight,
-			z: 0
+			y: transform.viewY + ((canvasY - transform.portY) / transform.portHeight) * transform.viewHeight
 		};
 	}
 
@@ -4516,7 +4515,6 @@
 			const finishCP = Math.max(1, Math.floor(Number(options.finishCP) || 1));
 			const pointX = Number.isFinite(Number(options.pointX)) ? Number(options.pointX) : 0;
 			const pointY = Number.isFinite(Number(options.pointY)) ? Number(options.pointY) : 0;
-			const pointZ = Number.isFinite(Number(options.pointZ)) ? Number(options.pointZ) : 0;
 			const pointMinFrame = Math.max(0, Math.floor(Number(options.pointMinFrame) || 0));
 			const pointMaxFrame = Math.max(
 				pointMinFrame,
@@ -4541,13 +4539,13 @@
 				const x = Number(player && player.x);
 				const y = Number(player && player.y);
 				if (!Number.isFinite(x) || !Number.isFinite(y)) return;
-				const distance = Math.hypot(x - pointX, y - pointY, pointZ);
+				const distance = Math.hypot(x - pointX, y - pointY);
 				if (!Number.isFinite(distance)) return;
 				reached = true;
 				if (distance < score || (distance === score && (bestPointFrame === null || frame < bestPointFrame))) {
 					score = distance;
 					bestPointFrame = frame;
-					bestPointPosition = { x, y, z: 0 };
+					bestPointPosition = { x, y };
 					scoreCheckpoint = state.collectedCP;
 				}
 			};
@@ -5271,7 +5269,7 @@
 		if (!inspection || (inspection.prepared && !inspection.prepared.ready)) {
 			return { inspection, boundaryStates: [], bodySpawnEvents: [], times: [] };
 		}
-		const trace = traceCompactPhysics(
+		const resumedTrace = traceCompactPhysics(
 			normalized,
 			{
 				...options,
@@ -5281,6 +5279,30 @@
 			snapshotFrame,
 			endFrame
 		);
+		const freshTrace = traceCompactPhysics(
+			normalized,
+			{
+				...options,
+				boundaryOnly: true,
+				resumeCurrentState: false
+			},
+			snapshotFrame,
+			endFrame
+		);
+		const highestCapturedCheckpoint = (candidate) =>
+			(candidate && Array.isArray(candidate.times) ? candidate.times : []).reduce(
+				(highest, value, index) => Number.isFinite(Number(value)) ? Math.max(highest, index) : highest,
+				0
+			);
+		const resumedTraceReady = !!(
+			resumedTrace &&
+			(!resumedTrace.prepared || resumedTrace.prepared.ready !== false)
+		);
+		const trace =
+			resumedTraceReady &&
+			highestCapturedCheckpoint(resumedTrace) >= highestCapturedCheckpoint(freshTrace)
+				? resumedTrace
+				: freshTrace;
 		const referenceTrace = options.captureReferenceFrames
 			? traceCompactPhysics(
 				normalized,
@@ -5293,16 +5315,7 @@
 				endFrame
 			)
 			: null;
-		const configurationTrace = referenceTrace || traceCompactPhysics(
-			normalized,
-			{
-				...options,
-				boundaryOnly: true,
-				resumeCurrentState: false
-			},
-			snapshotFrame,
-			endFrame
-		);
+		const configurationTrace = referenceTrace || freshTrace;
 		const referenceFrames = referenceTrace && Array.isArray(referenceTrace.frames)
 			? referenceTrace.frames
 			: [];

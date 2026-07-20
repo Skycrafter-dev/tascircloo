@@ -1179,14 +1179,16 @@
 			};
 		}
 
-		function readResult(status) {
+		function readResult(status, includePhysics = true) {
 			const view = new DataView(memory.buffer, abi.resultPtr, abi.resultSize);
 			const checkpoint = view.getInt32(4, true);
 			const checkpointFrames = [];
 			for (let index = 0; index < 8; index += 1) {
 				checkpointFrames.push(view.getInt32(16 + index * 4, true));
 			}
-			const bodyStateCount = Math.min(abi.bodyStateCapacity, Math.max(0, abi.bodyStateCount()));
+			const bodyStateCount = includePhysics
+				? Math.min(abi.bodyStateCapacity, Math.max(0, abi.bodyStateCount()))
+				: 0;
 			const bodyStates = [];
 			const bodyView = new DataView(
 				memory.buffer,
@@ -1216,10 +1218,9 @@
 					localCenterY: bodyView.getFloat64(offset + 112, true)
 				});
 			}
-			const jointStateCount = Math.min(
-				abi.jointStateCapacity,
-				Math.max(0, abi.jointStateCount())
-			);
+			const jointStateCount = includePhysics
+				? Math.min(abi.jointStateCapacity, Math.max(0, abi.jointStateCount()))
+				: 0;
 			const jointStates = [];
 			const jointView = new DataView(
 				memory.buffer,
@@ -1267,15 +1268,15 @@
 			return readResult(abi.simulate(values.length, integer(finishCheckpoint, 7)));
 		}
 
-		function beginSequence() {
+		function beginSequence(includePhysics = true) {
 			if (abi.sequenceBegin() !== 1) throw new Error('Wasm sequence initialization failed');
-			return readResult(0, false);
+			return readResult(0, includePhysics);
 		}
 
-		function stepSequence(input, finishCheckpoint = 7) {
+		function stepSequence(input, finishCheckpoint = 7, includePhysics = true) {
 			return readResult(
 				abi.sequenceStep(integer(input) & 3, integer(finishCheckpoint, 7)),
-				false
+				includePhysics
 			);
 		}
 

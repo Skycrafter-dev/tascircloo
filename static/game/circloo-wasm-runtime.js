@@ -128,6 +128,14 @@
 			angularDamping: finite(source && source.angularDamping),
 			gravityScale: finite(source && source.gravityScale, 1),
 			sleepTime: finite(source && source.sleepTime),
+			mass: finite(source && source.mass),
+			inverseMass: finite(source && source.inverseMass),
+			inertia: finite(source && source.inertia),
+			inverseInertia: finite(source && source.inverseInertia),
+			localCenter: source && source.localCenter
+				? { x: finite(source.localCenter.x), y: finite(source.localCenter.y) }
+				: { x: 0, y: 0 },
+			hasCapturedMassState: !!(source && source.hasCapturedMassState),
 			allowSleep: source ? source.allowSleep !== false : true,
 			awake: source ? source.awake !== false : true,
 			active: source ? source.active !== false : true,
@@ -169,6 +177,35 @@
 					x: finite(manifold.localPoint && manifold.localPoint.x),
 					y: finite(manifold.localPoint && manifold.localPoint.y)
 				},
+				points: (manifold.points || []).slice(0, 2).map((point) => ({
+					localPoint: {
+						x: finite(point && point.localPoint && point.localPoint.x),
+						y: finite(point && point.localPoint && point.localPoint.y)
+					},
+					normalImpulse: finite(point && point.normalImpulse),
+					tangentImpulse: finite(point && point.tangentImpulse),
+					id: integer(point && point.id)
+				}))
+			}
+		};
+	}
+
+	function normalizeInstanceContact(source) {
+		const manifold = source && source.manifold ? source.manifold : {};
+		return {
+			bodyAInstanceId: integer(source && source.bodyAInstanceId, -1),
+			fixtureAIndex: integer(source && source.fixtureAIndex, -1),
+			childA: integer(source && source.childA),
+			bodyBInstanceId: integer(source && source.bodyBInstanceId, -1),
+			fixtureBIndex: integer(source && source.fixtureBIndex, -1),
+			childB: integer(source && source.childB),
+			flags: integer(source && source.flags),
+			friction: finite(source && source.friction),
+			restitution: finite(source && source.restitution),
+			tangentSpeed: finite(source && source.tangentSpeed),
+			toiCount: integer(source && source.toiCount),
+			toi: finite(source && source.toi),
+			manifold: {
 				points: (manifold.points || []).slice(0, 2).map((point) => ({
 					localPoint: {
 						x: finite(point && point.localPoint && point.localPoint.x),
@@ -231,6 +268,39 @@
 			collideConnected: !!(source && source.collideConnected),
 			enableLimit: !!raw._7P1,
 			enableMotor: !!raw._8P1
+		};
+	}
+
+	function normalizeInstanceJoint(source) {
+		const anchorA = source && source.anchorA ? source.anchorA : {};
+		const anchorB = source && source.anchorB ? source.anchorB : anchorA;
+		const localAnchorA = source && source.localAnchorA ? source.localAnchorA : {};
+		const localAnchorB = source && source.localAnchorB ? source.localAnchorB : {};
+		const impulse = source && source.impulse ? source.impulse : {};
+		return {
+			type: integer(source && source.type, -1),
+			bodyAInstanceId: integer(source && source.bodyAId, -1),
+			bodyBInstanceId: integer(source && source.bodyBId, -1),
+			anchorA: { x: finite(anchorA.x), y: finite(anchorA.y) },
+			anchorB: { x: finite(anchorB.x), y: finite(anchorB.y) },
+			localAnchorA: { x: finite(localAnchorA.x), y: finite(localAnchorA.y) },
+			localAnchorB: { x: finite(localAnchorB.x), y: finite(localAnchorB.y) },
+			referenceAngle: finite(source && source.referenceAngle),
+			lowerAngle: finite(source && source.lowerAngle),
+			upperAngle: finite(source && source.upperAngle),
+			maxMotorTorque: finite(source && source.maxMotorTorque),
+			motorSpeed: finite(source && source.motorSpeed),
+			maxLength: finite(source && source.maxLength),
+			impulse: {
+				x: finite(impulse.x),
+				y: finite(impulse.y),
+				z: finite(impulse.z)
+			},
+			motorImpulse: finite(source && source.motorImpulse),
+			limitState: integer(source && source.limitState),
+			collideConnected: !!(source && source.collideConnected),
+			enableLimit: !!(source && source.enableLimit),
+			enableMotor: !!(source && source.enableMotor)
 		};
 	}
 
@@ -371,6 +441,8 @@
 			contacts: [],
 			joints: [],
 			collectibles: [],
+			checkpointPatches: [],
+			framePatches: [],
 			growthPatches: [],
 			unsupportedReasons
 		};
@@ -426,28 +498,220 @@
 			const boundaryBody = bodies[boundaryBodyIndex];
 			const fallbackFixture = boundaryBody.fixtures[0];
 			const initialRadius = integer(big.radius, 200);
-			const knownBodyIds = new Set(bodies.map((body) => body.instanceId));
 			for (const state of boundaryStates) {
 				const radius = integer(state && state.radius);
-				if (radius <= initialRadius) {
-					for (const circle of state.staticCircles || []) knownBodyIds.add(integer(circle.id, -1));
-					continue;
-				}
-				const spawnedBodies = [];
-				for (const circle of state.staticCircles || []) {
-					const id = integer(circle.id, -1);
-					if (knownBodyIds.has(id)) continue;
-					knownBodyIds.add(id);
-					spawnedBodies.push(staticCircleBody(circle));
-				}
+				if (radius <= initialRadius) continue;
 				model.growthPatches.push({
 					boundaryRadiusPixels: radius,
 					replaceBodyIndex: boundaryBodyIndex,
 					replacementFixtures: [boundaryPatchFixture(state, fallbackFixture)],
-					spawnedBodies
+					spawnedBodies: []
 				});
 			}
 		}
+
+		const initialRadius = integer(big.radius, 200);
+		const initialCheckpoint = integer(inspection.cp);
+		const knownBodyIds = new Set(bodies.map((body) => body.instanceId));
+		const framePatchFor = (frame) => {
+			let patch = model.framePatches.find((candidate) => integer(candidate.frame) === frame);
+			if (!patch) {
+				patch = {
+					frame,
+					spawnedBodies: [],
+					destroyedInstanceIds: [],
+					bodyUpdates: [],
+					bodyStateUpdates: [],
+					contacts: [],
+					spawnedJoints: [],
+					destroyedJoints: []
+				};
+				model.framePatches.push(patch);
+			}
+			return patch;
+		};
+		const bodySpawnEvents = Array.isArray(options.bodySpawnEvents)
+			? options.bodySpawnEvents.slice().sort((left, right) => integer(left && left.frame) - integer(right && right.frame))
+			: [];
+		for (const event of bodySpawnEvents) {
+			const spawnedBodies = [];
+			for (const source of event && Array.isArray(event.bodies) ? event.bodies : []) {
+				const body = normalizeBody(source);
+				if (knownBodyIds.has(body.instanceId)) continue;
+				knownBodyIds.add(body.instanceId);
+				spawnedBodies.push(body);
+			}
+			if (!spawnedBodies.length) continue;
+
+			const contactFrame = integer(event && event.frame, -1);
+			for (const source of event && Array.isArray(event.contacts) ? event.contacts : []) {
+				const contact = normalizeInstanceContact(source);
+				if (
+					contactFrame < integer(inspection.frame) ||
+					!knownBodyIds.has(contact.bodyAInstanceId) ||
+					!knownBodyIds.has(contact.bodyBInstanceId) ||
+					contact.fixtureAIndex < 0 ||
+					contact.fixtureBIndex < 0 ||
+					!contact.manifold.points.length
+				) continue;
+				framePatchFor(contactFrame).contacts.push(contact);
+			}
+
+			const radius = integer(event && event.boundaryRadius, initialRadius);
+			const growthAlarm = integer(event && event.growthAlarm, -1);
+			if (growthAlarm === 0 && radius > initialRadius) {
+				const growthPatch = model.growthPatches.find(
+					(patch) => integer(patch.boundaryRadiusPixels) === radius
+				);
+				if (!growthPatch) {
+					unsupportedReasons.push(`spawn-growth-radius:${radius}`);
+					continue;
+				}
+				growthPatch.spawnedBodies.push(...spawnedBodies);
+				continue;
+			}
+
+			const checkpoint = integer(event && event.checkpoint, initialCheckpoint);
+			if (checkpoint > initialCheckpoint) {
+				let checkpointPatch = model.checkpointPatches.find(
+					(patch) => integer(patch.checkpoint) === checkpoint
+				);
+				if (!checkpointPatch) {
+					checkpointPatch = { checkpoint, spawnedBodies: [] };
+					model.checkpointPatches.push(checkpointPatch);
+				}
+				checkpointPatch.spawnedBodies.push(...spawnedBodies);
+				continue;
+			}
+
+			if (radius > initialRadius) {
+				const growthPatch = model.growthPatches.find(
+					(patch) => integer(patch.boundaryRadiusPixels) === radius
+				);
+				if (!growthPatch) {
+					unsupportedReasons.push(`spawn-growth-radius:${radius}`);
+					continue;
+				}
+				growthPatch.spawnedBodies.push(...spawnedBodies);
+				continue;
+			}
+
+			const frame = integer(event && event.frame, -2) + (event && event.exactFrame ? 0 : 1);
+			if (frame >= integer(inspection.frame)) {
+				framePatchFor(frame).spawnedBodies.push(...spawnedBodies);
+				continue;
+			}
+
+			unsupportedReasons.push(`spawn-frame:${frame}`);
+		}
+		const bodyDestroyEvents = Array.isArray(options.bodyDestroyEvents)
+			? options.bodyDestroyEvents.slice().sort((left, right) => integer(left && left.frame) - integer(right && right.frame))
+			: [];
+		for (const event of bodyDestroyEvents) {
+			const frame = integer(event && event.frame, -2) + 1;
+			if (frame < integer(inspection.frame)) {
+				unsupportedReasons.push(`destroy-frame:${frame}`);
+				continue;
+			}
+			const ids = Array.isArray(event && event.instanceIds)
+				? event.instanceIds.map((value) => integer(value, -1)).filter((value) => value >= 0)
+				: [];
+			framePatchFor(frame).destroyedInstanceIds.push(...ids);
+		}
+		const bodyUpdateEvents = Array.isArray(options.bodyUpdateEvents)
+			? options.bodyUpdateEvents.slice().sort(
+				(left, right) => integer(left && left.frame) - integer(right && right.frame)
+			)
+			: [];
+		for (const event of bodyUpdateEvents) {
+			const frame = integer(event && event.frame, -1);
+			if (frame < integer(inspection.frame)) {
+				unsupportedReasons.push(`body-update-frame:${frame}`);
+				continue;
+			}
+			for (const source of event && Array.isArray(event.updates) ? event.updates : []) {
+				const instanceId = integer(source && source.instanceId, -1);
+				if (instanceId < 0 || !knownBodyIds.has(instanceId)) continue;
+				framePatchFor(frame).bodyUpdates.push({
+					instanceId,
+					type: integer(source && source.type),
+					linearDamping: finite(source && source.linearDamping),
+					angularDamping: finite(source && source.angularDamping),
+					gravityScale: finite(source && source.gravityScale, 1),
+					allowSleep: source && source.allowSleep !== false,
+					awake: source && source.awake !== false,
+					active: source && source.active !== false,
+					bullet: !!(source && source.bullet),
+					fixedRotation: !!(source && source.fixedRotation)
+				});
+			}
+		}
+		const jointSpawnEvents = Array.isArray(options.jointSpawnEvents)
+			? options.jointSpawnEvents.slice().sort(
+				(left, right) => integer(left && left.frame) - integer(right && right.frame)
+			)
+			: [];
+		for (const event of jointSpawnEvents) {
+			const frame = integer(event && event.frame, -1);
+			if (frame < integer(inspection.frame)) {
+				unsupportedReasons.push(`joint-spawn-frame:${frame}`);
+				continue;
+			}
+			for (const source of event && Array.isArray(event.joints) ? event.joints : []) {
+				const joint = normalizeInstanceJoint(source);
+				if (joint.type !== 1 && joint.type !== 10) {
+					unsupportedReasons.push(`joint-type:${joint.type}`);
+					continue;
+				}
+				if (
+					!knownBodyIds.has(joint.bodyAInstanceId) ||
+					!knownBodyIds.has(joint.bodyBInstanceId)
+				) {
+					unsupportedReasons.push('joint-spawn-body');
+					continue;
+				}
+				framePatchFor(frame).spawnedJoints.push(joint);
+			}
+			for (const source of event && Array.isArray(event.bodyStates) ? event.bodyStates : []) {
+				const instanceId = integer(source && source.instanceId, -1);
+				if (instanceId < 0 || !knownBodyIds.has(instanceId)) continue;
+				framePatchFor(frame).bodyStateUpdates.push({
+					instanceId,
+					position: {
+						x: Number(source && source.x),
+						y: Number(source && source.y)
+					},
+					angle: Number(source && source.angle),
+					linearVelocity: {
+						x: Number(source && source.vx),
+						y: Number(source && source.vy)
+					},
+					angularVelocity: Number(source && source.angularVelocity),
+					sleepTime: Number(source && source.sleepTime)
+				});
+			}
+		}
+		const jointDestroyEvents = Array.isArray(options.jointDestroyEvents)
+			? options.jointDestroyEvents.slice().sort(
+				(left, right) => integer(left && left.frame) - integer(right && right.frame)
+			)
+			: [];
+		for (const event of jointDestroyEvents) {
+			const frame = integer(event && event.frame, -1);
+			if (frame < integer(inspection.frame)) {
+				unsupportedReasons.push(`joint-destroy-frame:${frame}`);
+				continue;
+			}
+			for (const source of event && Array.isArray(event.joints) ? event.joints : []) {
+				framePatchFor(frame).destroyedJoints.push({
+					type: integer(source && source.type, -1),
+					bodyAInstanceId: integer(source && source.bodyAId, -1),
+					bodyBInstanceId: integer(source && source.bodyBId, -1)
+				});
+			}
+		}
+		model.checkpointPatches.sort((left, right) => integer(left.checkpoint) - integer(right.checkpoint));
+		model.framePatches.sort((left, right) => integer(left.frame) - integer(right.frame));
 
 		return model;
 	}
@@ -462,6 +726,10 @@
 			return 8;
 		};
 		const instantiated = await WebAssembly.instantiate(bytes, {
+			circloo_math: {
+				sin: Math.sin,
+				cos: Math.cos
+			},
 			wasi_snapshot_preview1: {
 				fd_close: () => failDescriptor('fd_close'),
 				fd_seek: () => failDescriptor('fd_seek'),
@@ -480,11 +748,30 @@
 			vertexCapacity: requireExport(exports, 'circloo_vertex_capacity')(),
 			resultPtr: requireExport(exports, 'circloo_result_ptr')(),
 			resultSize: requireExport(exports, 'circloo_result_size')(),
+			bodyStatePtr: requireExport(exports, 'circloo_body_state_ptr')(),
+			bodyStateCount: requireExport(exports, 'circloo_body_state_count'),
+			bodyStateCapacity: requireExport(exports, 'circloo_body_state_capacity')(),
+			bodyStateStride: requireExport(exports, 'circloo_body_state_stride')(),
+			jointStatePtr: requireExport(exports, 'circloo_joint_state_ptr')(),
+			jointStateCount: requireExport(exports, 'circloo_joint_state_count'),
+			jointStateCapacity: requireExport(exports, 'circloo_joint_state_capacity')(),
+			jointStateStride: requireExport(exports, 'circloo_joint_state_stride')(),
+			debugInitialFrame: requireExport(exports, 'circloo_model_debug_initial_frame'),
+			debugFramePatchCount: requireExport(exports, 'circloo_model_debug_frame_patch_count'),
+			debugFramePatchFrame: requireExport(exports, 'circloo_model_debug_frame_patch_frame'),
 			reset: requireExport(exports, 'circloo_model_reset'),
 			setWorld: requireExport(exports, 'circloo_model_set_world'),
 			setLifecycle: requireExport(exports, 'circloo_model_set_lifecycle'),
 			setCheckpointFrame: requireExport(exports, 'circloo_model_set_checkpoint_frame'),
 			addPatch: requireExport(exports, 'circloo_model_add_patch'),
+			addCheckpointPatch: requireExport(exports, 'circloo_model_add_checkpoint_patch'),
+			addFramePatch: requireExport(exports, 'circloo_model_add_frame_patch'),
+			addFramePatchDestroy: requireExport(exports, 'circloo_model_add_frame_patch_destroy'),
+			addFramePatchBodyUpdate: requireExport(exports, 'circloo_model_add_frame_patch_body_update'),
+			addFramePatchBodyState: requireExport(exports, 'circloo_model_add_frame_patch_body_state'),
+			addFramePatchContact: requireExport(exports, 'circloo_model_add_frame_patch_contact'),
+			addFramePatchJoint: requireExport(exports, 'circloo_model_add_frame_patch_joint'),
+			addFramePatchJointDestroy: requireExport(exports, 'circloo_model_add_frame_patch_joint_destroy'),
 			addBody: requireExport(exports, 'circloo_model_add_body'),
 			addJoint: requireExport(exports, 'circloo_model_add_joint'),
 			addContact: requireExport(exports, 'circloo_model_add_contact'),
@@ -496,10 +783,15 @@
 			addCollectible: requireExport(exports, 'circloo_model_add_collectible'),
 			finalize: requireExport(exports, 'circloo_model_finalize'),
 			simulate: requireExport(exports, 'circloo_simulate'),
+			sequenceBegin: requireExport(exports, 'circloo_sequence_begin'),
+			sequenceStep: requireExport(exports, 'circloo_sequence_step'),
+			sequenceEnd: requireExport(exports, 'circloo_sequence_end'),
 			selfTest: requireExport(exports, 'circloo_reference_self_test')
 		};
 
 		if (abi.resultSize !== 96) throw new Error(`Unexpected result size ${abi.resultSize}`);
+		if (abi.bodyStateStride !== 120) throw new Error(`Unexpected body-state stride ${abi.bodyStateStride}`);
+		if (abi.jointStateStride !== 48) throw new Error(`Unexpected joint-state stride ${abi.jointStateStride}`);
 		if (abi.selfTest() !== 1) throw new Error('Wasm reference self-test failed');
 		if (Object.values(importCalls).some((count) => count !== 0)) {
 			throw new Error(`Wasm used compatibility imports: ${JSON.stringify(importCalls)}`);
@@ -589,6 +881,7 @@
 		function addBody(body, patchIndex = -1) {
 			const position = body.position || {};
 			const velocity = body.linearVelocity || {};
+			const localCenter = body.localCenter || {};
 			const handle = abi.addBody(
 				patchIndex,
 				integer(body.instanceId, -1),
@@ -604,6 +897,13 @@
 				finite(body.angularDamping),
 				finite(body.gravityScale, 1),
 				finite(body.sleepTime),
+				finite(body.mass),
+				finite(body.inverseMass),
+				finite(body.inertia),
+				finite(body.inverseInertia),
+				finite(localCenter.x),
+				finite(localCenter.y),
+				body.hasCapturedMassState ? 1 : 0,
 				bodyFlags(body)
 			);
 			if (handle < 0) throw new Error('Wasm rejected body');
@@ -737,6 +1037,122 @@
 				) !== 1) throw new Error('Wasm rejected collectible');
 			}
 
+			for (const patch of model.checkpointPatches || []) {
+				const patchIndex = abi.addCheckpointPatch(integer(patch.checkpoint));
+				if (patchIndex < 0) throw new Error('Wasm rejected checkpoint patch');
+				const encodedTarget = -patchIndex - 2;
+				for (const body of patch.spawnedBodies || []) addBody(body, encodedTarget);
+			}
+
+			for (const patch of model.framePatches || []) {
+				const encodedTarget = abi.addFramePatch(integer(patch.frame));
+				if (encodedTarget === 0) throw new Error('Wasm rejected frame patch');
+				for (const instanceId of patch.destroyedInstanceIds || []) {
+					if (abi.addFramePatchDestroy(encodedTarget, integer(instanceId, -1)) !== 1) {
+						throw new Error('Wasm rejected frame-patch body destruction');
+					}
+				}
+				for (const body of patch.spawnedBodies || []) addBody(body, encodedTarget);
+				for (const joint of patch.destroyedJoints || []) {
+					if (abi.addFramePatchJointDestroy(
+						encodedTarget,
+						integer(joint.type, -1),
+						integer(joint.bodyAInstanceId, -1),
+						integer(joint.bodyBInstanceId, -1)
+					) !== 1) throw new Error('Wasm rejected frame joint destruction');
+				}
+				for (const joint of patch.spawnedJoints || []) {
+					let flags = 0;
+					if (joint.collideConnected) flags |= 1;
+					if (joint.enableLimit) flags |= 2;
+					if (joint.enableMotor) flags |= 4;
+					if (abi.addFramePatchJoint(
+						encodedTarget,
+						integer(joint.type, -1),
+						integer(joint.bodyAInstanceId, -1),
+						integer(joint.bodyBInstanceId, -1),
+						finite(joint.anchorA && joint.anchorA.x),
+						finite(joint.anchorA && joint.anchorA.y),
+						finite(joint.anchorB && joint.anchorB.x),
+						finite(joint.anchorB && joint.anchorB.y),
+						finite(joint.localAnchorA && joint.localAnchorA.x),
+						finite(joint.localAnchorA && joint.localAnchorA.y),
+						finite(joint.localAnchorB && joint.localAnchorB.x),
+						finite(joint.localAnchorB && joint.localAnchorB.y),
+						finite(joint.referenceAngle),
+						finite(joint.lowerAngle),
+						finite(joint.upperAngle),
+						finite(joint.maxMotorTorque),
+						finite(joint.motorSpeed),
+						finite(joint.maxLength),
+						finite(joint.impulse && joint.impulse.x),
+						finite(joint.impulse && joint.impulse.y),
+						finite(joint.impulse && joint.impulse.z),
+						finite(joint.motorImpulse),
+						integer(joint.limitState),
+						flags
+					) !== 1) throw new Error('Wasm rejected frame joint');
+				}
+				for (const update of patch.bodyStateUpdates || []) {
+					if (abi.addFramePatchBodyState(
+						encodedTarget,
+						integer(update.instanceId, -1),
+						Number(update.position && update.position.x),
+						Number(update.position && update.position.y),
+						Number(update.angle),
+						Number(update.linearVelocity && update.linearVelocity.x),
+						Number(update.linearVelocity && update.linearVelocity.y),
+						Number(update.angularVelocity),
+						Number(update.sleepTime)
+					) !== 1) throw new Error('Wasm rejected frame body state');
+				}
+				for (const update of patch.bodyUpdates || []) {
+					if (abi.addFramePatchBodyUpdate(
+						encodedTarget,
+						integer(update.instanceId, -1),
+						integer(update.type),
+						finite(update.linearDamping),
+						finite(update.angularDamping),
+						finite(update.gravityScale, 1),
+						bodyFlags(update)
+					) !== 1) throw new Error('Wasm rejected frame body update');
+				}
+				for (const contact of patch.contacts || []) {
+					const points = contact.manifold && Array.isArray(contact.manifold.points)
+						? contact.manifold.points.slice(0, 2)
+						: [];
+					if (!points.length) continue;
+					const point0 = points[0] || {};
+					const point1 = points[1] || {};
+					if (abi.addFramePatchContact(
+						encodedTarget,
+						integer(contact.bodyAInstanceId, -1),
+						integer(contact.fixtureAIndex, -1),
+						integer(contact.childA),
+						integer(contact.bodyBInstanceId, -1),
+						integer(contact.fixtureBIndex, -1),
+						integer(contact.childB),
+						integer(contact.flags),
+						finite(contact.friction),
+						finite(contact.restitution),
+						finite(contact.tangentSpeed),
+						integer(contact.toiCount),
+						finite(contact.toi, 1),
+						points.length,
+						finite(point0.localPoint && point0.localPoint.x),
+						finite(point0.localPoint && point0.localPoint.y),
+						finite(point0.normalImpulse),
+						finite(point0.tangentImpulse),
+						integer(point0.id),
+						finite(point1.localPoint && point1.localPoint.x),
+						finite(point1.localPoint && point1.localPoint.y),
+						finite(point1.normalImpulse),
+						finite(point1.tangentImpulse),
+						integer(point1.id)
+					) !== 1) throw new Error('Wasm rejected frame contact');
+				}
+			}
+
 			for (const patch of model.growthPatches || []) {
 				const replaceHandle = integer(patch.replaceBodyIndex, -1) >= 0
 					? bodyHandles[integer(patch.replaceBodyIndex)]
@@ -751,7 +1167,16 @@
 			}
 
 			if (abi.finalize() !== 1) throw new Error('Wasm rejected finalized model');
-			return { bodyCount: bodyHandles.length };
+			const framePatchCount = abi.debugFramePatchCount();
+			const framePatches = [];
+			for (let index = 0; index < framePatchCount; index += 1) {
+				framePatches.push(abi.debugFramePatchFrame(index));
+			}
+			return {
+				bodyCount: bodyHandles.length,
+				initialFrame: abi.debugInitialFrame(),
+				framePatches
+			};
 		}
 
 		function readResult(status) {
@@ -760,6 +1185,59 @@
 			const checkpointFrames = [];
 			for (let index = 0; index < 8; index += 1) {
 				checkpointFrames.push(view.getInt32(16 + index * 4, true));
+			}
+			const bodyStateCount = Math.min(abi.bodyStateCapacity, Math.max(0, abi.bodyStateCount()));
+			const bodyStates = [];
+			const bodyView = new DataView(
+				memory.buffer,
+				abi.bodyStatePtr,
+				bodyStateCount * abi.bodyStateStride
+			);
+			for (let index = 0; index < bodyStateCount; index += 1) {
+				const offset = index * abi.bodyStateStride;
+				bodyStates.push({
+					ordinal: index,
+					instanceId: bodyView.getInt32(offset, true),
+					objectIndex: bodyView.getInt32(offset + 4, true),
+					type: bodyView.getInt32(offset + 8, true),
+					flags: bodyView.getInt32(offset + 12, true),
+					x: bodyView.getFloat64(offset + 16, true),
+					y: bodyView.getFloat64(offset + 24, true),
+					vx: bodyView.getFloat64(offset + 32, true),
+					vy: bodyView.getFloat64(offset + 40, true),
+					angle: bodyView.getFloat64(offset + 48, true),
+					angularVelocity: bodyView.getFloat64(offset + 56, true),
+					sleepTime: bodyView.getFloat64(offset + 64, true),
+					mass: bodyView.getFloat64(offset + 72, true),
+					inverseMass: bodyView.getFloat64(offset + 80, true),
+					inertia: bodyView.getFloat64(offset + 88, true),
+					inverseInertia: bodyView.getFloat64(offset + 96, true),
+					localCenterX: bodyView.getFloat64(offset + 104, true),
+					localCenterY: bodyView.getFloat64(offset + 112, true)
+				});
+			}
+			const jointStateCount = Math.min(
+				abi.jointStateCapacity,
+				Math.max(0, abi.jointStateCount())
+			);
+			const jointStates = [];
+			const jointView = new DataView(
+				memory.buffer,
+				abi.jointStatePtr,
+				jointStateCount * abi.jointStateStride
+			);
+			for (let index = 0; index < jointStateCount; index += 1) {
+				const offset = index * abi.jointStateStride;
+				jointStates.push({
+					type: jointView.getInt32(offset, true),
+					bodyAId: jointView.getInt32(offset + 4, true),
+					bodyBId: jointView.getInt32(offset + 8, true),
+					limitState: jointView.getInt32(offset + 12, true),
+					impulseX: jointView.getFloat64(offset + 16, true),
+					impulseY: jointView.getFloat64(offset + 24, true),
+					impulseZ: jointView.getFloat64(offset + 32, true),
+					motorImpulse: jointView.getFloat64(offset + 40, true)
+				});
 			}
 			return {
 				status,
@@ -774,7 +1252,9 @@
 				vx: view.getFloat64(64, true),
 				vy: view.getFloat64(72, true),
 				angle: view.getFloat64(80, true),
-				angularVelocity: view.getFloat64(88, true)
+				angularVelocity: view.getFloat64(88, true),
+				bodyStates,
+				jointStates
 			};
 		}
 
@@ -787,13 +1267,32 @@
 			return readResult(abi.simulate(values.length, integer(finishCheckpoint, 7)));
 		}
 
+		function beginSequence() {
+			if (abi.sequenceBegin() !== 1) throw new Error('Wasm sequence initialization failed');
+			return readResult(0, false);
+		}
+
+		function stepSequence(input, finishCheckpoint = 7) {
+			return readResult(
+				abi.sequenceStep(integer(input) & 3, integer(finishCheckpoint, 7)),
+				false
+			);
+		}
+
+		function endSequence() {
+			abi.sequenceEnd();
+		}
+
 		return {
 			instance,
 			exports,
 			memory,
 			importCalls,
 			loadModel,
-			simulate
+			simulate,
+			beginSequence,
+			stepSequence,
+			endSequence
 		};
 	}
 

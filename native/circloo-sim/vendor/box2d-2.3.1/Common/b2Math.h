@@ -22,6 +22,13 @@
 #include <Box2D/Common/b2Settings.h>
 #include <math.h>
 
+#if defined(__wasm__)
+extern "C" double circloo_host_sin(double value)
+	__attribute__((import_module("circloo_math"), import_name("sin")));
+extern "C" double circloo_host_cos(double value)
+	__attribute__((import_module("circloo_math"), import_name("cos")));
+#endif
+
 /// This function is used to ensure that a floating point number is not a NaN or infinity.
 inline bool b2IsValid(float32 x)
 {
@@ -292,16 +299,26 @@ struct b2Rot
 	explicit b2Rot(float32 angle)
 	{
 		/// TODO_ERIN optimize
+		#if defined(__wasm__)
+		s = circloo_host_sin(angle);
+		c = circloo_host_cos(angle);
+		#else
 		s = sin(angle);
 		c = cos(angle);
+		#endif
 	}
 
 	/// Set using an angle in radians.
 	void Set(float32 angle)
 	{
 		/// TODO_ERIN optimize
+		#if defined(__wasm__)
+		s = circloo_host_sin(angle);
+		c = circloo_host_cos(angle);
+		#else
 		s = sin(angle);
 		c = cos(angle);
+		#endif
 	}
 
 	/// Set to the identity rotation

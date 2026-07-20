@@ -7,6 +7,10 @@ const iterations = Math.max(1, Number(process.argv[3]) || 100);
 const bytes = fs.readFileSync(path);
 const module = new WebAssembly.Module(bytes);
 const instance = await WebAssembly.instantiate(module, {
+	circloo_math: {
+		sin: Math.sin,
+		cos: Math.cos,
+	},
   wasi_snapshot_preview1: {
     fd_close() { return 0; },
     fd_seek() { return 0; },

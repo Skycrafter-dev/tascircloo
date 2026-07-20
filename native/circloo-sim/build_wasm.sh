@@ -5,8 +5,15 @@ root="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 build="$root/build/wasm"
 vendor="$root/vendor/box2d-2.3.1"
 toolchain_root="${CIRCLOO_WASI_ROOT:-/tmp/circloo-wasi-toolchain/root}"
-sysroot="$toolchain_root/usr/share/wasi-sysroot"
-resource="$toolchain_root/usr/lib/clang/22"
+compiler="clang++"
+if [[ -x "$toolchain_root/bin/clang++" && -d "$toolchain_root/share/wasi-sysroot" ]]; then
+    compiler="$toolchain_root/bin/clang++"
+    sysroot="$toolchain_root/share/wasi-sysroot"
+    resource="$toolchain_root/lib/clang/22"
+else
+    sysroot="$toolchain_root/usr/share/wasi-sysroot"
+    resource="$toolchain_root/usr/lib/clang/22"
+fi
 output="$build/circloo-sim.wasm"
 public_output="$root/../../static/game/circloo-sim.wasm"
 
@@ -28,7 +35,7 @@ for symbol in "${abi_exports[@]}"; do
     export_flags+=("-Wl,--export=$symbol")
 done
 
-clang++ \
+"$compiler" \
     --target=wasm32-wasip1 \
     --sysroot="$sysroot" \
     -resource-dir "$resource" \

@@ -631,6 +631,12 @@
 				prepPumps: 0,
 				rewindFrame: snapshotFrame,
 				wasm: true,
+				physicsBodies: Array.isArray(result && result.bodyStates)
+					? result.bodyStates.map((body) => ({ ...body }))
+					: [],
+				physicsJoints: Array.isArray(result && result.jointStates)
+					? result.jointStates.map((joint) => ({ ...joint }))
+					: [],
 				finalState: {
 					frame,
 					checkpoint,
@@ -665,16 +671,96 @@
 		});
 	}
 
-	function continuousStateNumberMatches(left, right) {
+	function continuousStateNumberMatches(left, right, exact = false) {
 		const a = Number(left);
 		const b = Number(right);
 		if (Object.is(a, b)) return true;
+		if (exact) return false;
 		if (!Number.isFinite(a) || !Number.isFinite(b)) return false;
 		const tolerance = 2e-12 + 2e-14 * Math.max(Math.abs(a), Math.abs(b));
 		return Math.abs(a - b) <= tolerance;
 	}
 
-	function finalStateMatches(leftResult, rightResult) {
+	function exactPhysicsFramesDigest(frames) {
+		const scratch = new DataView(new ArrayBuffer(8));
+		let hashA = 0x811c9dc5;
+		let hashB = 0x9e3779b9;
+		const addByte = (value) => {
+			const byte = Number(value) & 0xff;
+			hashA = Math.imul((hashA ^ byte) >>> 0, 0x01000193) >>> 0;
+			hashB = Math.imul((hashB ^ byte) >>> 0, 0x85ebca6b) >>> 0;
+		};
+		const addInt32 = (value) => {
+			scratch.setInt32(0, Number(value) | 0, true);
+			for (let index = 0; index < 4; index += 1) addByte(scratch.getUint8(index));
+		};
+		const addFloat64 = (value) => {
+			scratch.setFloat64(0, Number(value), true);
+			for (let index = 0; index < 8; index += 1) addByte(scratch.getUint8(index));
+		};
+		const addFinalState = (state) => {
+			for (const key of ['frame', 'checkpoint', 'growthAlarm', 'boundaryRadius']) {
+				addInt32(state && state[key]);
+			}
+			for (const key of ['x', 'y', 'vx', 'vy', 'angle', 'angularVelocity']) {
+				addFloat64(state && state[key]);
+			}
+		};
+		const bodyIntegerKeys = ['ordinal', 'instanceId', 'objectIndex', 'type', 'flags'];
+		const bodyFloatKeys = [
+			'x', 'y', 'vx', 'vy', 'angle', 'angularVelocity', 'sleepTime',
+			'mass', 'inverseMass', 'inertia', 'inverseInertia', 'localCenterX', 'localCenterY'
+		];
+		const jointIntegerKeys = ['type', 'bodyAId', 'bodyBId', 'limitState'];
+		const jointFloatKeys = ['impulseX', 'impulseY', 'impulseZ', 'motorImpulse'];
+		const values = Array.isArray(frames) ? frames : [];
+		addInt32(values.length);
+		for (const frame of values) {
+			addInt32(frame && frame.frame);
+			addInt32(frame && frame.cp);
+			addFinalState(frame && frame.finalState);
+			const bodies = Array.isArray(frame && frame.physicsBodies) ? frame.physicsBodies : [];
+			addInt32(bodies.length);
+			for (const body of bodies) {
+				for (const key of bodyIntegerKeys) addInt32(body && body[key]);
+				for (const key of bodyFloatKeys) addFloat64(body && body[key]);
+			}
+			const joints = Array.isArray(frame && frame.physicsJoints) ? frame.physicsJoints : [];
+			addInt32(joints.length);
+			for (const joint of joints) {
+				for (const key of jointIntegerKeys) addInt32(joint && joint[key]);
+				for (const key of jointFloatKeys) addFloat64(joint && joint[key]);
+			}
+			const contacts = Array.isArray(frame && frame.physicsContactStates)
+				? frame.physicsContactStates
+				: [];
+			addInt32(contacts.length);
+			for (const contact of contacts) {
+				for (const key of [
+					'bodyAInstanceId', 'fixtureAIndex', 'childA',
+					'bodyBInstanceId', 'fixtureBIndex', 'childB',
+					'flags', 'toiCount'
+				]) addInt32(contact && contact[key]);
+				for (const key of ['friction', 'restitution', 'tangentSpeed', 'toi']) {
+					addFloat64(contact && contact[key]);
+				}
+				const points = contact && contact.manifold && Array.isArray(contact.manifold.points)
+					? contact.manifold.points
+					: [];
+				addInt32(points.length);
+				for (const point of points) {
+					addFloat64(point && point.localPoint && point.localPoint.x);
+					addFloat64(point && point.localPoint && point.localPoint.y);
+					addFloat64(point && point.normalImpulse);
+					addFloat64(point && point.tangentImpulse);
+					addInt32(point && point.id);
+				}
+			}
+		}
+		return `${hashA.toString(16).padStart(8, '0')}${hashB.toString(16).padStart(8, '0')}`;
+	}
+
+	function finalStateMatches(leftResult, rightResult, exact = false) {
 		const left = leftResult && leftResult.debug && leftResult.debug.finalState;
 		const right = rightResult && rightResult.debug && rightResult.debug.finalState;
 		if (!left || !right) return left === right;
@@ -682,9 +768,92 @@
 			if (Number(left[key]) !== Number(right[key])) return false;
 		}
 		for (const key of ['x', 'y', 'vx', 'vy', 'angle', 'angularVelocity']) {
-			if (!continuousStateNumberMatches(left[key], right[key])) return false;
+			if (!continuousStateNumberMatches(left[key], right[key], exact)) return false;
 		}
 		return true;
+	}
+
+	function firstPhysicsBodyMismatch(leftResult, rightResult, exact = false) {
+		const left = leftResult && leftResult.debug && leftResult.debug.physicsBodies;
+		const right = rightResult && rightResult.debug && rightResult.debug.physicsBodies;
+		if (!Array.isArray(left) || !Array.isArray(right)) {
+			return left === right ? null : { reason: 'missing-body-state', left, right };
+		}
+		if (left.length !== right.length) {
+			return { reason: 'body-count', leftCount: left.length, rightCount: right.length, leftBodies: left, rightBodies: right };
+		}
+		for (let index = 0; index < left.length; index += 1) {
+			const a = left[index] || {};
+			const b = right[index] || {};
+			for (const key of ['ordinal', 'instanceId', 'objectIndex', 'type', 'flags']) {
+				if (Number(a[key]) !== Number(b[key])) {
+					return { reason: key, index, left: a, right: b };
+				}
+			}
+			for (const key of [
+				'x',
+				'y',
+				'vx',
+				'vy',
+				'angle',
+				'angularVelocity',
+				'sleepTime',
+				'mass',
+				'inverseMass',
+				'inertia',
+				'inverseInertia',
+				'localCenterX',
+				'localCenterY'
+			]) {
+				if (!continuousStateNumberMatches(a[key], b[key], exact)) {
+					return {
+						reason: key,
+						index,
+						left: a,
+						right: b,
+						leftNegativeZero: Object.is(Number(a[key]), -0),
+						rightNegativeZero: Object.is(Number(b[key]), -0)
+					};
+				}
+			}
+		}
+		return null;
+	}
+
+	function firstPhysicsJointMismatch(leftResult, rightResult, exact = false) {
+		const sortJoints = (value) => (Array.isArray(value) ? value.slice() : []).sort((left, right) => {
+			for (const key of ['type', 'bodyAId', 'bodyBId', 'limitState', 'impulseX', 'impulseY', 'impulseZ', 'motorImpulse']) {
+				const difference = Number(left && left[key]) - Number(right && right[key]);
+				if (difference !== 0) return difference;
+			}
+			return 0;
+		});
+		const left = sortJoints(leftResult && leftResult.debug && leftResult.debug.physicsJoints);
+		const right = sortJoints(rightResult && rightResult.debug && rightResult.debug.physicsJoints);
+		if (left.length !== right.length) {
+			return { reason: 'joint-count', leftCount: left.length, rightCount: right.length };
+		}
+		for (let index = 0; index < left.length; index += 1) {
+			const a = left[index] || {};
+			const b = right[index] || {};
+			for (const key of ['type', 'bodyAId', 'bodyBId', 'limitState']) {
+				if (Number(a[key]) !== Number(b[key])) {
+					return { reason: key, index, left: a, right: b };
+				}
+			}
+			for (const key of ['impulseX', 'impulseY', 'impulseZ', 'motorImpulse']) {
+				if (!continuousStateNumberMatches(a[key], b[key], exact)) {
+					return { reason: key, index, left: a, right: b };
+				}
+			}
+		}
+		return null;
+	}
+
+	function fullPhysicsStateMatches(leftResult, rightResult, exact = false) {
+		return finalStateMatches(leftResult, rightResult, exact) &&
+			!firstPhysicsBodyMismatch(leftResult, rightResult, exact) &&
+			!firstPhysicsJointMismatch(leftResult, rightResult, exact);
 	}
 
 	async function createWasmSearchOptimizer(base, options, settings) {
@@ -714,7 +883,11 @@
 		const startedAt = realNow();
 		const capture = W.__circlooTasCaptureWasmRuntimeModel(
 			normalizeScript(base),
-			{ ...options, finishCP: checkpointTarget },
+			{
+				...options,
+				finishCP: checkpointTarget,
+				captureReferenceFrames: !!(settings && settings.verifyEveryFrame)
+			},
 			snapshotFrame,
 			maximumGameFrame
 		);
@@ -723,7 +896,12 @@
 		}
 
 		const model = W.CirclooWasmRuntime.modelFromInspection(capture.inspection, {
-			boundaryStates: capture.boundaryStates
+			boundaryStates: capture.boundaryStates,
+			bodySpawnEvents: capture.bodySpawnEvents,
+			bodyDestroyEvents: capture.bodyDestroyEvents,
+			bodyUpdateEvents: capture.bodyUpdateEvents,
+			jointSpawnEvents: capture.jointSpawnEvents,
+			jointDestroyEvents: capture.jointDestroyEvents
 		});
 		if (Array.isArray(model.unsupportedReasons) && model.unsupportedReasons.length) {
 			return {
@@ -738,12 +916,20 @@
 			0,
 			checkpointTarget - model.lifecycle.initialCheckpoint - 1
 		);
-		if ((model.growthPatches || []).length < requiredGrowthPatches) {
+		if (!debugWasmParity && (model.growthPatches || []).length < requiredGrowthPatches) {
 			return { optimizer: null, reason: 'wasm-incomplete-growth-model' };
 		}
 
+		let modelDebug = null;
 		try {
-			runtime.loadModel(model);
+			modelDebug = {
+				...runtime.loadModel(model),
+				bodyUpdateEvents: capture.bodyUpdateEvents,
+				frameBodyUpdates: (model.framePatches || []).map((patch) => ({
+					frame: patch.frame,
+					updates: patch.bodyUpdates || []
+				}))
+			};
 		} catch (error) {
 			return {
 				optimizer: null,
@@ -807,6 +993,39 @@
 			return evaluateWasmThrough(candidate, maximumGameFrame);
 		}
 
+		function beginFrameSequence(candidate) {
+			const candidateScript = normalizeScript(candidate);
+			if (!prefixMatches(candidateScript)) return null;
+			const inputs = encodeScriptInputs(
+				candidateScript,
+				snapshotFrame + 1,
+				maximumGameFrame
+			);
+			const raw = runtime.beginSequence();
+			return {
+				inputs,
+				nextInputIndex: 0,
+				result: wasmTrialResult(raw, snapshotFrame, options.target)
+			};
+		}
+
+		function stepFrameSequence(sequence) {
+			if (!sequence || sequence.nextInputIndex >= sequence.inputs.length) {
+				return sequence && sequence.result;
+			}
+			const raw = runtime.stepSequence(
+				sequence.inputs[sequence.nextInputIndex],
+				checkpointTarget
+			);
+			sequence.nextInputIndex += 1;
+			sequence.result = wasmTrialResult(raw, snapshotFrame, options.target);
+			return sequence.result;
+		}
+
+		function endFrameSequence() {
+			runtime.endSequence();
+		}
+
 		return {
 			optimizer: {
 				mode: 'wasm-runtime',
@@ -823,6 +1042,10 @@
 					return false;
 				},
 				scoreOnlyValidation: true,
+				modelDebug,
+				referenceFrames: Array.isArray(capture.referenceFrames)
+					? capture.referenceFrames
+					: [],
 				evaluate,
 				restoreVerifier() {
 					return true;
@@ -834,7 +1057,10 @@
 				},
 				prefixMatches,
 				validationSignature: finalStateSignature,
-				debugEvaluateThrough: evaluateWasmThrough
+				debugEvaluateThrough: evaluateWasmThrough,
+				beginFrameSequence,
+				stepFrameSequence,
+				endFrameSequence
 			},
 			reason: ''
 		};
@@ -1087,7 +1313,10 @@
 			const options = message.options || {};
 			const settings = message.settings || {};
 			const candidates = Array.isArray(message.candidates) ? message.candidates : [];
-			const built = await createWasmSearchOptimizer(base, options, settings);
+			const built = await createWasmSearchOptimizer(base, options, {
+				...settings,
+				verifyEveryFrame: !!message.verifyEveryFrame
+			});
 			if (!built.optimizer) {
 				W.postMessage({
 					source: 'circloo-tas-worker',
@@ -1103,6 +1332,8 @@
 			let firstMismatch = null;
 			let checked = 0;
 			let stateMismatchCount = 0;
+			let frameChecked = 0;
+			let firstFrameMismatch = null;
 			for (let index = 0; index < candidates.length; index += 1) {
 				const candidate = normalizeScript(candidates[index]);
 				const fastResult = message.scoreOnly && typeof built.optimizer.debugEvaluateThrough === 'function'
@@ -1116,7 +1347,10 @@
 				const exact = comparableTrialResult(exactResult);
 				checked += 1;
 				const resultMatches = JSON.stringify(fast) === JSON.stringify(exact);
-				const stateMatches = finalStateMatches(fastResult, exactResult);
+				const bodyMismatch = firstPhysicsBodyMismatch(fastResult, exactResult, true);
+				const jointMismatch = firstPhysicsJointMismatch(fastResult, exactResult, true);
+				const stateMatches = finalStateMatches(fastResult, exactResult, true) &&
+					!bodyMismatch && !jointMismatch;
 				if (!stateMatches) stateMismatchCount += 1;
 				if (!resultMatches || (!message.scoreOnly && !stateMatches)) {
 					firstMismatch = {
@@ -1126,15 +1360,101 @@
 						exact,
 						fastDebug: fastResult.debug,
 						fastState: fastResult.debug && fastResult.debug.finalState,
-						exactState: exactResult.debug && exactResult.debug.finalState
+						exactState: exactResult.debug && exactResult.debug.finalState,
+						bodyMismatch,
+						jointMismatch
 					};
 					break;
 				}
 			}
 
+			const finalMismatch = firstMismatch;
+			if (
+				message.verifyEveryFrame &&
+				typeof built.optimizer.beginFrameSequence === 'function' &&
+				Array.isArray(built.optimizer.referenceFrames) &&
+				candidates.length
+			) {
+				firstMismatch = null;
+				const candidate = normalizeScript(candidates[0]);
+				const sequence = built.optimizer.beginFrameSequence(candidate);
+				try {
+					let fastResult = sequence && sequence.result;
+					for (const referenceFrame of built.optimizer.referenceFrames) {
+						const frame = finiteFrame(referenceFrame && referenceFrame.frame, -1);
+						if (frame < built.optimizer.rewindFrame) continue;
+						while (
+							fastResult &&
+							finiteFrame(
+								fastResult.debug && fastResult.debug.finalState && fastResult.debug.finalState.frame,
+								-1
+							) < frame
+						) {
+							const previousFrame = finiteFrame(
+								fastResult.debug && fastResult.debug.finalState && fastResult.debug.finalState.frame,
+								-1
+							);
+							fastResult = built.optimizer.stepFrameSequence(sequence);
+							const nextFrame = finiteFrame(
+								fastResult && fastResult.debug && fastResult.debug.finalState && fastResult.debug.finalState.frame,
+								-1
+							);
+							if (nextFrame <= previousFrame) {
+								firstFrameMismatch = {
+									frame,
+									reason: 'wasm-sequence-stalled',
+									previousFrame,
+									nextFrame
+								};
+								firstMismatch = {
+									index: 0,
+									candidate,
+									frame,
+									reason: 'wasm-sequence-stalled'
+								};
+								break;
+							}
+						}
+						if (firstMismatch) break;
+						const exactState = referenceFrame && referenceFrame.finalState;
+						const exactResult = {
+							debug: {
+								finalState: exactState,
+								physicsBodies: referenceFrame && referenceFrame.physicsBodies,
+								physicsJoints: referenceFrame && referenceFrame.physicsJoints
+							}
+						};
+						const bodyMismatch = firstPhysicsBodyMismatch(fastResult, exactResult, true);
+						const jointMismatch = firstPhysicsJointMismatch(fastResult, exactResult, true);
+						frameChecked += 1;
+						if (!finalStateMatches(fastResult, exactResult, true) || bodyMismatch || jointMismatch) {
+							firstFrameMismatch = {
+								frame,
+								fastState: fastResult && fastResult.debug && fastResult.debug.finalState,
+								exactState,
+								bodyMismatch,
+								jointMismatch
+							};
+							firstMismatch = {
+								index: 0,
+								candidate,
+								frame,
+								bodyMismatch,
+								jointMismatch
+							};
+							break;
+						}
+					}
+				} finally {
+					built.optimizer.endFrameSequence();
+				}
+			}
+			if (!firstMismatch) firstMismatch = finalMismatch;
+
 			let firstDivergence = null;
 			if (
 				firstMismatch &&
+				!firstFrameMismatch &&
 				message.findFirstDivergence &&
 				typeof built.optimizer.debugEvaluateThrough === 'function'
 			) {
@@ -1152,11 +1472,15 @@
 						...options,
 						maxFrames: frame + 1
 					});
-					if (!finalStateMatches(fastResult, exactResult)) {
+					const bodyMismatch = firstPhysicsBodyMismatch(fastResult, exactResult, true);
+					const jointMismatch = firstPhysicsJointMismatch(fastResult, exactResult, true);
+					if (!finalStateMatches(fastResult, exactResult, true) || bodyMismatch || jointMismatch) {
 						firstDivergence = {
 							frame,
 							fastState: fastResult.debug && fastResult.debug.finalState,
-							exactState: exactResult.debug && exactResult.debug.finalState
+							exactState: exactResult.debug && exactResult.debug.finalState,
+							bodyMismatch,
+							jointMismatch
 						};
 						break;
 					}
@@ -1170,7 +1494,14 @@
 				reason: firstMismatch ? 'mismatch' : '',
 				checked,
 				stateMismatchCount,
+				frameChecked,
+				referenceFrameCount: Array.isArray(built.optimizer.referenceFrames)
+					? built.optimizer.referenceFrames.length
+					: 0,
+				referenceFrameDigest: exactPhysicsFramesDigest(built.optimizer.referenceFrames),
+				firstFrameMismatch,
 				buildMs: built.optimizer.buildMs,
+				modelDebug: built.optimizer.modelDebug,
 				firstMismatch,
 				firstDivergence
 			});

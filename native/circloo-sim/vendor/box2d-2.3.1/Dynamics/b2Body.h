@@ -239,6 +239,37 @@ public:
 	/// @return a struct containing the mass, inertia and center of the body.
 	void GetMassData(b2MassData* data) const;
 
+	/// Restore an exact captured mass state without recomputing reciprocal values.
+	void SetCapturedMassState(
+		float32 mass,
+		float32 inverseMass,
+		float32 inertia,
+		float32 inverseInertia,
+		const b2Vec2& localCenter
+	) {
+		m_mass = mass;
+		m_invMass = inverseMass;
+		m_I = inertia;
+		m_invI = inverseInertia;
+		m_sweep.localCenter = localCenter;
+		m_sweep.c0 = m_sweep.c = b2Mul(m_xf, m_sweep.localCenter);
+		m_xf.p = m_sweep.c - b2Mul(m_xf.q, m_sweep.localCenter);
+	}
+
+	void GetCapturedMassState(
+		float32& mass,
+		float32& inverseMass,
+		float32& inertia,
+		float32& inverseInertia,
+		b2Vec2& localCenter
+	) const {
+		mass = m_mass;
+		inverseMass = m_invMass;
+		inertia = m_I;
+		inverseInertia = m_invI;
+		localCenter = m_sweep.localCenter;
+	}
+
 	/// Set the mass properties to override the mass properties of the fixtures.
 	/// Note that this changes the center of mass position.
 	/// Note that creating or destroying fixtures can also alter the mass.

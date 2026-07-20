@@ -63,6 +63,11 @@ public:
 		m_state = state;
 	}
 
+	void GetCapturedSolverState(float32& impulse, b2LimitState& state) const {
+		impulse = m_impulse;
+		state = m_state;
+	}
+
 	b2Vec2 GetAnchorA() const;
 	b2Vec2 GetAnchorB() const;
 

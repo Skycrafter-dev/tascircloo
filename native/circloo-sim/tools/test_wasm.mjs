@@ -6,6 +6,8 @@ const bytes = fs.readFileSync(path);
 const module = new WebAssembly.Module(bytes);
 const imports = WebAssembly.Module.imports(module);
 const expectedImports = new Set([
+	'circloo_math.sin',
+	'circloo_math.cos',
   'wasi_snapshot_preview1.fd_close',
   'wasi_snapshot_preview1.fd_seek',
   'wasi_snapshot_preview1.fd_write',
@@ -19,6 +21,10 @@ for (const entry of imports) {
 
 const importCalls = { fd_close: 0, fd_seek: 0, fd_write: 0 };
 const instance = await WebAssembly.instantiate(module, {
+	circloo_math: {
+		sin: Math.sin,
+		cos: Math.cos,
+	},
   wasi_snapshot_preview1: {
     fd_close() { importCalls.fd_close++; return 0; },
     fd_seek() { importCalls.fd_seek++; return 0; },

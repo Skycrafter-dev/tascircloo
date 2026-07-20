@@ -4119,6 +4119,331 @@
 		};
 	}
 
+	function physicsBodiesCreationOrder() {
+		const world = physicsWorld();
+		const newestFirst = [];
+		for (
+			let body = world && typeof world._DF1 === 'function' ? world._DF1() : null;
+			body;
+			body = typeof body._kD1 === 'function' ? body._kD1() : null
+		) {
+			newestFirst.push(body);
+		}
+		return newestFirst.reverse();
+	}
+
+	function capturePhysicsBodyStates() {
+		return physicsBodiesCreationOrder().map((body, ordinal) => {
+			const user = typeof body._bu1 === 'function' ? body._bu1() : null;
+			const position = typeof body._Rc1 === 'function' ? body._Rc1() : null;
+			const velocity = typeof body._zC1 === 'function' ? body._zC1() : null;
+			const instanceId = Number(user && user.id);
+			const objectIndex = Number(user && user._Ok);
+			return {
+				ordinal,
+				instanceId: Number.isFinite(instanceId) ? instanceId : -1,
+				objectIndex: Number.isFinite(objectIndex) ? objectIndex : -1,
+				type: Number(typeof body._bs1 === 'function' ? body._bs1() : 0),
+				flags:
+					(typeof body._bD1 === 'function' && body._bD1() ? 1 : 0) |
+					(typeof body._cD1 === 'function' && body._cD1() ? 2 : 0) |
+					(typeof body._eD1 === 'function' && body._eD1() ? 4 : 0) |
+					(typeof body._9D1 === 'function' && body._9D1() ? 8 : 0) |
+					(typeof body._gD1 === 'function' && body._gD1() ? 16 : 0),
+				x: Number(position && position.x),
+				y: Number(position && position.y),
+				vx: Number(velocity && velocity.x),
+				vy: Number(velocity && velocity.y),
+				angle: Number(typeof body._Hq1 === 'function' ? body._Hq1() : NaN),
+				angularVelocity: Number(typeof body._BC1 === 'function' ? body._BC1() : NaN),
+				sleepTime: Number(body._TB1) || 0,
+				mass: Number(body._VB1),
+				inverseMass: Number(body._WB1),
+				inertia: Number(body._XB1),
+				inverseInertia: Number(body._YB1),
+				localCenterX: Number(body._HB1 && body._HB1._Nq1 && body._HB1._Nq1.x),
+				localCenterY: Number(body._HB1 && body._HB1._Nq1 && body._HB1._Nq1.y)
+			};
+		});
+	}
+
+	function physicsFixtureIndex(body, target) {
+		let index = 0;
+		for (
+			let fixture = body && typeof body._hD1 === 'function' ? body._hD1() : null;
+			fixture;
+			fixture = typeof fixture._kD1 === 'function' ? fixture._kD1() : null, index += 1
+		) {
+			if (fixture === target) return index;
+		}
+		return -1;
+	}
+
+	function capturePhysicsContactStates(instanceIds = null) {
+		const selected = instanceIds instanceof Set ? instanceIds : null;
+		const contacts = [];
+		const world = physicsWorld();
+		for (let contact = world && world._eC1 ? world._eC1._JB1 : null; contact; contact = contact._LB1) {
+			const fixtureA = typeof contact._pC1 === 'function' ? contact._pC1() : contact._2G1;
+			const fixtureB = typeof contact._rC1 === 'function' ? contact._rC1() : contact._4G1;
+			const bodyA = fixtureA && typeof fixtureA._LD1 === 'function' ? fixtureA._LD1() : null;
+			const bodyB = fixtureB && typeof fixtureB._LD1 === 'function' ? fixtureB._LD1() : null;
+			const userA = bodyA && typeof bodyA._bu1 === 'function' ? bodyA._bu1() : null;
+			const userB = bodyB && typeof bodyB._bu1 === 'function' ? bodyB._bu1() : null;
+			const bodyAInstanceId = Number(userA && userA.id);
+			const bodyBInstanceId = Number(userB && userB.id);
+			if (
+				selected &&
+				!selected.has(bodyAInstanceId) &&
+				!selected.has(bodyBInstanceId)
+			) continue;
+
+			const manifold = typeof contact._OL1 === 'function' ? contact._OL1() : contact._IL1;
+			const manifoldPoints = [];
+			const manifoldCount = Math.max(0, Math.min(2, Number(manifold && manifold._cw1) || 0));
+			for (let pointIndex = 0; pointIndex < manifoldCount; pointIndex += 1) {
+				const point = manifold._aw1 && manifold._aw1[pointIndex];
+				manifoldPoints.push({
+					localPoint: vec(point && point._5w1),
+					normalImpulse: Number(point && point._6w1),
+					tangentImpulse: Number(point && point._7w1),
+					id: Number(point && point.id && typeof point.id._qH === 'function' ? point.id._qH() : 0)
+				});
+			}
+			contacts.push({
+				bodyAInstanceId: Number.isFinite(bodyAInstanceId) ? bodyAInstanceId : -1,
+				fixtureAIndex: physicsFixtureIndex(bodyA, fixtureA),
+				childA: Number(typeof contact._tF1 === 'function' ? contact._tF1() : contact._LL1),
+				bodyBInstanceId: Number.isFinite(bodyBInstanceId) ? bodyBInstanceId : -1,
+				fixtureBIndex: physicsFixtureIndex(bodyB, fixtureB),
+				childB: Number(typeof contact._vF1 === 'function' ? contact._vF1() : contact._ML1),
+				flags: Number(contact._zB1),
+				toiCount: Number(contact._8G1),
+				toi: Number(contact._9G1),
+				friction: Number(contact._CD1),
+				restitution: Number(contact._DD1),
+				tangentSpeed: Number(contact._NL1) || 0,
+				manifold: {
+					type: Number(manifold && manifold.type),
+					localNormal: vec(manifold && manifold._bw1),
+					localPoint: vec(manifold && manifold._5w1),
+					points: manifoldPoints
+				}
+			});
+		}
+		return contacts;
+	}
+
+	function capturePhysicsBodyConfiguration(body) {
+		const user = body && typeof body._bu1 === 'function' ? body._bu1() : null;
+		return {
+			instanceId: Number(user && user.id),
+			objectIndex: Number(user && user._Ok),
+			type: Number(body && typeof body._bs1 === 'function' ? body._bs1() : 0),
+			linearDamping: Number(body && typeof body._YC1 === 'function' ? body._YC1() : body && body._OB1),
+			angularDamping: Number(body && typeof body._ZC1 === 'function' ? body._ZC1() : body && body._PB1),
+			gravityScale: Number(body && typeof body.__C1 === 'function' ? body.__C1() : body && body._QB1),
+			allowSleep: !!(body && typeof body._bD1 === 'function' ? body._bD1() : true),
+			awake: !!(body && typeof body._cD1 === 'function' ? body._cD1() : true),
+			active: !!(body && typeof body._eD1 === 'function' ? body._eD1() : true),
+			bullet: !!(body && typeof body._9D1 === 'function' ? body._9D1() : false),
+			fixedRotation: !!(body && typeof body._gD1 === 'function' ? body._gD1() : false)
+		};
+	}
+
+	function physicsBodyConfigurationMatches(left, right) {
+		if (!left || !right) return left === right;
+		for (const key of [
+			'instanceId',
+			'objectIndex',
+			'type',
+			'linearDamping',
+			'angularDamping',
+			'gravityScale',
+			'allowSleep',
+			'awake',
+			'active',
+			'bullet',
+			'fixedRotation'
+		]) {
+			if (!Object.is(left[key], right[key])) return false;
+		}
+		return true;
+	}
+
+	function capturePhysicsJointStates() {
+		const world = physicsWorld();
+		const joints = [];
+		for (
+			let joint = world && typeof world._iD1 === 'function' ? world._iD1() : null;
+			joint;
+			joint = typeof joint._kD1 === 'function' ? joint._kD1() : joint._LB1 || null
+		) {
+			let bodyA = null;
+			let bodyB = null;
+			try {
+				bodyA = typeof joint._pG1 === 'function' ? joint._pG1() : joint._eF1 || null;
+				bodyB = typeof joint._qG1 === 'function' ? joint._qG1() : joint._cF1 || null;
+			} catch {}
+			const userA = bodyA && typeof bodyA._bu1 === 'function' ? bodyA._bu1() : null;
+			const userB = bodyB && typeof bodyB._bu1 === 'function' ? bodyB._bu1() : null;
+			const type = Number(typeof joint._bs1 === 'function' ? joint._bs1() : joint._461);
+			const impulse = joint && joint._1P1;
+			joints.push({
+				type,
+				bodyAId: Number(userA && userA.id),
+				bodyBId: Number(userB && userB.id),
+				limitState: Number(joint && (joint._9P1 ?? joint._cT1)) || 0,
+				impulseX: typeof impulse === 'number' ? Number(impulse) : Number(impulse && impulse.x) || 0,
+				impulseY: typeof impulse === 'number' ? 0 : Number(impulse && impulse.y) || 0,
+				impulseZ: typeof impulse === 'number' ? 0 : Number(impulse && impulse._kC) || 0,
+				motorImpulse: Number(joint && (joint._2P1 ?? joint._6P1)) || 0
+			});
+		}
+		return joints.sort((left, right) => {
+			for (const key of ['type', 'bodyAId', 'bodyBId', 'limitState', 'impulseX', 'impulseY', 'impulseZ', 'motorImpulse']) {
+				const difference = Number(left[key]) - Number(right[key]);
+				if (difference !== 0) return difference;
+			}
+			return 0;
+		});
+	}
+
+	function physicsJointsCreationOrder() {
+		const world = physicsWorld();
+		const joints = [];
+		for (
+			let joint = world && typeof world._iD1 === 'function' ? world._iD1() : null;
+			joint;
+			joint = typeof joint._kD1 === 'function' ? joint._kD1() : joint._LB1 || null
+		) joints.push(joint);
+		return joints;
+	}
+
+	function capturePhysicsJointDefinition(joint) {
+		let bodyA = null;
+		let bodyB = null;
+		try {
+			bodyA = typeof joint._pG1 === 'function' ? joint._pG1() : joint._eF1 || null;
+			bodyB = typeof joint._qG1 === 'function' ? joint._qG1() : joint._cF1 || null;
+		} catch {}
+		const userA = bodyA && typeof bodyA._bu1 === 'function' ? bodyA._bu1() : null;
+		const userB = bodyB && typeof bodyB._bu1 === 'function' ? bodyB._bu1() : null;
+		const type = Number(typeof joint._bs1 === 'function' ? joint._bs1() : joint._461);
+		const impulse = joint && joint._1P1;
+		return {
+			type,
+			bodyAId: Number(userA && userA.id),
+			bodyBId: Number(userB && userB.id),
+			anchorA: typeof joint._rG1 === 'function' ? vec(joint._rG1()) : null,
+			anchorB: typeof joint._sG1 === 'function' ? vec(joint._sG1()) : null,
+			localAnchorA: typeof joint._jP1 === 'function' ? vec(joint._jP1()) : null,
+			localAnchorB: typeof joint._kP1 === 'function' ? vec(joint._kP1()) : null,
+			referenceAngle: Number(joint && joint._0P1) || 0,
+			lowerAngle: Number(joint && joint._2P1) || 0,
+			upperAngle: Number(joint && joint._3P1) || 0,
+			maxMotorTorque: Number(joint && joint._4P1) || 0,
+			motorSpeed: Number(joint && joint._5P1) || 0,
+			maxLength: Number(joint && joint._bT1) || 0,
+			impulse: typeof impulse === 'number'
+				? { x: Number(impulse), y: 0, z: 0 }
+				: {
+					x: Number(impulse && impulse.x) || 0,
+					y: Number(impulse && impulse.y) || 0,
+					z: Number(impulse && impulse._kC) || 0
+				},
+			motorImpulse: Number(joint && joint._6P1) || 0,
+			limitState: Number(joint && (joint._9P1 ?? joint._cT1)) || 0,
+			collideConnected: !!(joint && joint._iF1),
+			enableLimit: !!(joint && joint._7P1),
+			enableMotor: !!(joint && joint._8P1)
+		};
+	}
+
+	function physicsJointDefinitionKey(joint) {
+		return [
+			Number(joint && joint.type),
+			Number(joint && joint.bodyAId),
+			Number(joint && joint.bodyBId)
+		].join(':');
+	}
+
+	function capturePhysicsShape(shape) {
+		if (!shape) return null;
+		const type = Number(shape._461);
+		let vertices = [];
+		if (type === 1) {
+			vertices = [vec(shape._Gs1), vec(shape._Hs1)].filter(Boolean);
+		} else if (Array.isArray(shape._Ts1)) {
+			vertices = shape._Ts1
+				.slice(0, Math.max(0, Number(shape._Us1) || shape._Ts1.length))
+				.map(vec);
+		}
+		return {
+			type,
+			radius: Number(shape._as1),
+			center: vec(shape._ts1),
+			vertices,
+			vertexCount: Number(shape._Us1),
+			previousVertex: vec(type === 1 ? shape._Fs1 : shape._Vs1),
+			nextVertex: vec(type === 1 ? shape._Is1 : shape._Ws1),
+			hasPreviousVertex: !!(type === 1 ? shape._Js1 : shape._Xs1),
+			hasNextVertex: !!(type === 1 ? shape._Ks1 : shape._Ys1)
+		};
+	}
+
+	function capturePhysicsBody(body) {
+		const fixtures = [];
+		for (
+			let fixture = body && typeof body._hD1 === 'function' ? body._hD1() : null;
+			fixture;
+			fixture = typeof fixture._kD1 === 'function' ? fixture._kD1() : null
+		) {
+			const shape = typeof fixture._ED1 === 'function'
+				? fixture._ED1()
+				: fixture._zD1 || fixture._7D1 || fixture._3D1 || null;
+			const filter = typeof fixture._JD1 === 'function' ? fixture._JD1() : fixture._AD1;
+			fixtures.push({
+				shape: capturePhysicsShape(shape),
+				density: typeof fixture._MD1 === 'function' ? Number(fixture._MD1()) : Number(fixture._iC1),
+				friction: typeof fixture._ND1 === 'function' ? Number(fixture._ND1()) : Number(fixture._CD1),
+				restitution: typeof fixture._OD1 === 'function' ? Number(fixture._OD1()) : Number(fixture._DD1),
+				sensor: typeof fixture._GD1 === 'function' ? !!fixture._GD1() : !!fixture._BD1,
+				filter: filter ? {
+					categoryBits: Number(filter._sD1),
+					maskBits: Number(filter._tD1),
+					groupIndex: Number(filter._uD1)
+				} : null
+			});
+		}
+		const user = body && typeof body._bu1 === 'function' ? body._bu1() : null;
+		return {
+			userId: Number(user && user.id),
+			objectIndex: Number(user && user._Ok),
+			type: typeof body._bs1 === 'function' ? Number(body._bs1()) : 0,
+			position: vec(typeof body._Rc1 === 'function' ? body._Rc1() : null),
+			angle: typeof body._Hq1 === 'function' ? Number(body._Hq1()) : 0,
+			linearVelocity: vec(typeof body._zC1 === 'function' ? body._zC1() : null),
+			angularVelocity: typeof body._BC1 === 'function' ? Number(body._BC1()) : 0,
+			linearDamping: typeof body._YC1 === 'function' ? Number(body._YC1()) : Number(body._OB1),
+			angularDamping: typeof body._ZC1 === 'function' ? Number(body._ZC1()) : Number(body._PB1),
+			gravityScale: typeof body.__C1 === 'function' ? Number(body.__C1()) : Number(body._QB1),
+			sleepTime: Number(body._TB1) || 0,
+			mass: Number(body._VB1),
+			inverseMass: Number(body._WB1),
+			inertia: Number(body._XB1),
+			inverseInertia: Number(body._YB1),
+			localCenter: vec(body._HB1 && body._HB1._Nq1),
+			hasCapturedMassState: true,
+			allowSleep: typeof body._bD1 === 'function' ? !!body._bD1() : true,
+			awake: typeof body._cD1 === 'function' ? !!body._cD1() : true,
+			active: typeof body._eD1 === 'function' ? !!body._eD1() : true,
+			bullet: typeof body._9D1 === 'function' ? !!body._9D1() : false,
+			fixedRotation: typeof body._gD1 === 'function' ? !!body._gD1() : false,
+			fixtures
+		};
+	}
+
 	function simTrial(script, options) {
 		state.exactCheckpointMode = true;
 		const trialStart = REAL.now();
@@ -4214,6 +4539,8 @@
 					endRadius: prepareDebug.endRadius,
 					endFrame: prepareDebug.endFrame,
 					ready: prepareDebug.ready,
+					physicsBodies: capturePhysicsBodyStates(),
+					physicsJoints: capturePhysicsJointStates(),
 					finalState: {
 						frame: gameFrame(),
 						checkpoint: state.collectedCP,
@@ -4370,6 +4697,12 @@
 					angularDamping: typeof body._ZC1 === 'function' ? Number(body._ZC1()) : Number(body._PB1),
 					gravityScale: typeof body.__C1 === 'function' ? Number(body.__C1()) : Number(body._QB1),
 					sleepTime: Number(body._TB1) || 0,
+					mass: Number(body._VB1),
+					inverseMass: Number(body._WB1),
+					inertia: Number(body._XB1),
+					inverseInertia: Number(body._YB1),
+					localCenter: vec(body._HB1 && body._HB1._Nq1),
+					hasCapturedMassState: true,
 					allowSleep: typeof body._bD1 === 'function' ? !!body._bD1() : true,
 					awake: typeof body._cD1 === 'function' ? !!body._cD1() : true,
 					active: typeof body._eD1 === 'function' ? !!body._eD1() : true,
@@ -4522,82 +4855,74 @@
 		if (!IS_SIM) return null;
 		const normalized = normalizeScript(script);
 		const boundaryOnly = !!options.boundaryOnly;
-		const solverEvents = [];
-		const solverStartFrame = Math.floor(Number(options.solverStartFrame ?? 307));
-		const solverEndFrame = Math.floor(Number(options.solverEndFrame ?? 310));
-		const solverChildren = new Set(
-			(Array.isArray(options.solverChildren) ? options.solverChildren : [92])
-				.map((value) => Math.floor(Number(value)))
-				.filter(Number.isFinite)
-		);
-		const solverPrototype =
-			!boundaryOnly && W.b2 && W.b2.ContactSolver ? W.b2.ContactSolver.prototype : null;
-		const originalInitializeVelocity = solverPrototype && solverPrototype._YM1;
-		const originalSolveVelocity = solverPrototype && solverPrototype._mN1;
+		const resumeCurrentState = !!options.resumeCurrentState;
+		const initialStepOverrides = [];
+		const initialStepOverrideIds = new Set();
+		let islandPrototype = null;
+		let originalIslandSolve = null;
 		state.exactCheckpointMode = true;
 		try {
-			state.cpTimes = [];
-			state.collectedCP = 0;
-			state.lastCP = 0;
-			const prepared = prepareSimTrialLevel(options.level, options.seed);
-			if (!prepared.ready) return { prepared };
-			state.cpTimes = [];
-			state.collectedCP = 0;
-			state.lastCP = 0;
+			let prepared;
+			if (resumeCurrentState) {
+				prepared = {
+					ready: gameFrame() === startFrame && !!gmPlayer() && simHasPhysicsWorld(),
+					prepPumps: 0,
+					restartPumps: 0,
+					startFrame: gameFrame(),
+					endFrame: gameFrame(),
+					startRadius: radiusCP(),
+					endRadius: radiusCP()
+				};
+				if (!prepared.ready) return { prepared };
+			} else {
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+				prepared = prepareSimTrialLevel(options.level, options.seed);
+				if (!prepared.ready) return { prepared };
+				state.cpTimes = [];
+				state.collectedCP = 0;
+				state.lastCP = 0;
+			}
 			armReplay(normalized, { normalized: true });
 			resetFreeze(gmLevel());
 
-			const captureSolverConstraint = (solver, phase) => {
-				const frame = gameFrame();
-				if (
-					frame < solverStartFrame ||
-					frame > solverEndFrame ||
-					!solver ||
-					!Array.isArray(solver._PM1)
-				) return;
-				for (const constraint of solver._PM1) {
-					if (!constraint || !(constraint._cw1 > 0)) continue;
-					const contact = solver._VM1 && solver._VM1[constraint._HM1];
-					const childA = Number(contact && contact._LL1);
-					const childB = Number(contact && contact._ML1);
-					if (!solverChildren.has(childA) && !solverChildren.has(childB)) continue;
-					const point = constraint._aw1 && constraint._aw1[0];
-					const velocityA = solver._UM1 && solver._UM1[constraint._Gu1];
-					const velocityB = solver._UM1 && solver._UM1[constraint._Hu1];
-					solverEvents.push({
-						frame,
-						phase,
-						childA,
-						childB,
-						normal: vec(constraint._ms1),
-						rA: vec(point && point._Wv1),
-						rB: vec(point && point._Xv1),
-						normalMass: Number(point && point._tM1),
-						tangentMass: Number(point && point._uM1),
-						velocityBias: Number(point && point._vM1),
-						normalImpulse: Number(point && point._6w1),
-						tangentImpulse: Number(point && point._7w1),
-						vA: vec(velocityA && velocityA._3B),
-						wA: Number(velocityA && velocityA._77),
-						vB: vec(velocityB && velocityB._3B),
-						wB: Number(velocityB && velocityB._77)
-					});
-				}
-			};
-
-			if (solverPrototype && typeof originalInitializeVelocity === 'function') {
-				solverPrototype._YM1 = function tracedInitializeVelocity() {
-					const result = originalInitializeVelocity.apply(this, arguments);
-					captureSolverConstraint(this, 'initialize');
-					return result;
-				};
-			}
-			if (solverPrototype && typeof originalSolveVelocity === 'function') {
-				solverPrototype._mN1 = function tracedSolveVelocity() {
-					captureSolverConstraint(this, 'solve-before');
-					const result = originalSolveVelocity.apply(this, arguments);
-					captureSolverConstraint(this, 'solve-after');
-					return result;
+			const liveWorld = physicsWorld();
+			const liveIsland = liveWorld && liveWorld._ME1;
+			islandPrototype = liveIsland ? Object.getPrototypeOf(liveIsland) : null;
+			originalIslandSolve = islandPrototype && islandPrototype._oq1;
+			if (islandPrototype && typeof originalIslandSolve === 'function') {
+				islandPrototype._oq1 = function tracedIslandSolve() {
+					if (gameFrame() === startFrame) {
+						for (let index = 0; index < Number(this._BE1 || 0); index += 1) {
+							const body = this._7G1 && this._7G1[index];
+							if (!body) continue;
+							const user = typeof body._bu1 === 'function' ? body._bu1() : null;
+							const instanceId = Number(user && user.id);
+							if (!Number.isFinite(instanceId) || initialStepOverrideIds.has(instanceId)) continue;
+							initialStepOverrideIds.add(instanceId);
+							initialStepOverrides.push({
+								instanceId,
+								objectIndex: Number(user && user._Ok),
+								type: Number(body._461),
+								position: vec(body._HB1 && body._HB1._67),
+								angle: Number(body._HB1 && body._HB1._RA),
+								linearVelocity: vec(body._MB1),
+								angularVelocity: Number(body._NB1),
+								linearDamping: Number(body._OB1),
+								angularDamping: Number(body._PB1),
+								gravityScale: Number(body._QB1),
+								force: vec(body._RB1),
+								torque: Number(body._SB1),
+								allowSleep: typeof body._bD1 === 'function' ? !!body._bD1() : true,
+								awake: typeof body._cD1 === 'function' ? !!body._cD1() : true,
+								active: typeof body._eD1 === 'function' ? !!body._eD1() : true,
+								bullet: typeof body._9D1 === 'function' ? !!body._9D1() : false,
+								fixedRotation: typeof body._gD1 === 'function' ? !!body._gD1() : false
+							});
+						}
+					}
+					return originalIslandSolve.apply(this, arguments);
 				};
 			}
 
@@ -4619,12 +4944,23 @@
 					},
 					times: state.cpTimes.slice(),
 					frames: [],
-					boundaryStates: [],
-					solverEvents: []
+					boundaryStates: []
 				};
 			}
 			const frames = [];
 			const boundaryStates = [];
+			const bodySpawnEvents = [];
+			const bodyDestroyEvents = [];
+			const bodyUpdateEvents = [];
+			const jointSpawnEvents = [];
+			const jointDestroyEvents = [];
+			let activeBodies = new Set(physicsBodiesCreationOrder());
+			let activeBodyConfigurations = new Map(
+				Array.from(activeBodies, (body) => [body, capturePhysicsBodyConfiguration(body)])
+			);
+			let activeJoints = new Map(
+				physicsJointsCreationOrder().map((joint) => [joint, capturePhysicsJointDefinition(joint)])
+			);
 			let lastBoundaryRadius = null;
 			const maxSteps = Math.max(1, endFrame - startFrame + 2);
 			for (let step = 0; step < maxSteps && gameFrame() <= endFrame; step++) {
@@ -4632,6 +4968,94 @@
 				const body = player && player._Xd1 && player._Xd1._932;
 				const big = gmBig();
 				const boundaryRadius = Number(big && big._jd);
+				const currentBodies = physicsBodiesCreationOrder();
+				const currentBodySet = new Set(currentBodies);
+				const currentBodyConfigurations = new Map(
+					currentBodies.map((currentBody) => [
+						currentBody,
+						capturePhysicsBodyConfiguration(currentBody)
+					])
+				);
+				const currentJointObjects = physicsJointsCreationOrder();
+				const currentJoints = new Map(
+					currentJointObjects.map((joint) => [joint, capturePhysicsJointDefinition(joint)])
+				);
+				const destroyedJoints = [];
+				for (const [previousJoint, definition] of activeJoints) {
+					if (!currentJoints.has(previousJoint)) destroyedJoints.push(definition);
+				}
+				if (destroyedJoints.length) {
+					jointDestroyEvents.push({
+						frame: gameFrame(),
+						joints: destroyedJoints
+					});
+				}
+				const spawnedJoints = [];
+				for (const [currentJoint, definition] of currentJoints) {
+					if (!activeJoints.has(currentJoint)) spawnedJoints.push(definition);
+				}
+				if (spawnedJoints.length) {
+					jointSpawnEvents.push({
+						frame: gameFrame(),
+						joints: spawnedJoints
+					});
+				}
+				activeJoints = currentJoints;
+				const bodyUpdates = [];
+				for (const currentBody of currentBodies) {
+					if (!activeBodies.has(currentBody)) continue;
+					const previous = activeBodyConfigurations.get(currentBody);
+					const current = currentBodyConfigurations.get(currentBody);
+					// Dynamic awake/sleep transitions are produced by Box2D itself and
+					// must remain input-dependent. Capture only scripted configuration
+					// changes on static/kinematic bodies.
+					if (!current || current.type === 2 || physicsBodyConfigurationMatches(previous, current)) continue;
+					bodyUpdates.push(current);
+				}
+				if (bodyUpdates.length) {
+					bodyUpdateEvents.push({
+						frame: gameFrame(),
+						updates: bodyUpdates
+					});
+				}
+				const destroyedInstanceIds = [];
+				for (const previousBody of activeBodies) {
+					if (currentBodySet.has(previousBody)) continue;
+					const user = typeof previousBody._bu1 === 'function' ? previousBody._bu1() : null;
+					const instanceId = Number(user && user.id);
+					if (Number.isFinite(instanceId)) destroyedInstanceIds.push(instanceId);
+				}
+				if (destroyedInstanceIds.length) {
+					bodyDestroyEvents.push({
+						frame: gameFrame(),
+						checkpoint: state.collectedCP,
+						growthAlarm: Array.isArray(big && big._md) ? Number(big._md[0]) : -1,
+						boundaryRadius,
+						instanceIds: destroyedInstanceIds
+					});
+				}
+				const spawnedBodies = [];
+				for (const currentBody of currentBodies) {
+					if (activeBodies.has(currentBody)) continue;
+					spawnedBodies.push(capturePhysicsBody(currentBody));
+				}
+				if (spawnedBodies.length) {
+					const spawnedInstanceIds = new Set(
+						spawnedBodies.map((body) => Number(body && body.userId))
+					);
+					bodySpawnEvents.push({
+						frame: gameFrame(),
+						checkpoint: state.collectedCP,
+						growthAlarm: Array.isArray(big && big._md) ? Number(big._md[0]) : -1,
+						boundaryRadius,
+						bodies: spawnedBodies,
+						contacts: capturePhysicsContactStates(spawnedInstanceIds).filter(
+							(contact) => contact.manifold && contact.manifold.points.length
+						)
+					});
+				}
+				activeBodies = currentBodySet;
+				activeBodyConfigurations = currentBodyConfigurations;
 				if (Number.isFinite(boundaryRadius) && boundaryRadius !== lastBoundaryRadius) {
 					const boundaryBody = big && big._Xd1 && big._Xd1._932;
 					const boundaryFixture = boundaryBody && typeof boundaryBody._hD1 === 'function' ? boundaryBody._hD1() : null;
@@ -4732,6 +5156,22 @@
 					frame: gameFrame(),
 					cp: state.collectedCP,
 					input: effectiveInput(),
+					physicsBodies: capturePhysicsBodyStates(),
+					physicsJoints: capturePhysicsJointStates(),
+					physicsJointDefinitions: currentJointObjects.map(capturePhysicsJointDefinition),
+					physicsContactStates: capturePhysicsContactStates(),
+					finalState: {
+						frame: gameFrame(),
+						checkpoint: state.collectedCP,
+						growthAlarm: Array.isArray(big && big._md) ? Number(big._md[0]) : -1,
+						boundaryRadius,
+						x: Number(body && typeof body._Rc1 === 'function' ? body._Rc1().x : NaN),
+						y: Number(body && typeof body._Rc1 === 'function' ? body._Rc1().y : NaN),
+						vx: Number(body && typeof body._zC1 === 'function' ? body._zC1().x : NaN),
+						vy: Number(body && typeof body._zC1 === 'function' ? body._zC1().y : NaN),
+						angle: Number(body && typeof body._Hq1 === 'function' ? body._Hq1() : NaN),
+						angularVelocity: Number(body && typeof body._BC1 === 'function' ? body._BC1() : NaN)
+					},
 					contacts,
 					instancePosition: player ? { x: Number(player.x), y: Number(player.y) } : null,
 					playerRadius: Number(player && player._jd),
@@ -4757,10 +5197,9 @@
 				if (state.collectedCP >= Math.max(1, Math.floor(Number(options.finishCP) || 7))) break;
 				W.__circlooTasPumpFrame();
 			}
-			return { prepared, times: state.cpTimes.slice(), frames, boundaryStates, solverEvents, solverProbe: { b2: !!W.b2, keys: W.b2 ? Object.keys(W.b2).filter((key) => key.toLowerCase().includes('contact')).slice(0, 30) : [], contactSolver: !!(W.b2 && W.b2.ContactSolver), contactSolverType: typeof (W.b2 && W.b2.ContactSolver), contactSolverKeys: W.b2 && W.b2.ContactSolver ? Object.keys(W.b2.ContactSolver).slice(0, 30) : [], methods: solverPrototype ? Object.getOwnPropertyNames(solverPrototype) : [] } };
+			return { prepared, times: state.cpTimes.slice(), frames, boundaryStates, bodySpawnEvents, bodyDestroyEvents, bodyUpdateEvents, jointSpawnEvents, jointDestroyEvents, initialStepOverrides };
 		} finally {
-			if (solverPrototype && originalInitializeVelocity) solverPrototype._YM1 = originalInitializeVelocity;
-			if (solverPrototype && originalSolveVelocity) solverPrototype._mN1 = originalSolveVelocity;
+			if (islandPrototype && originalIslandSolve) islandPrototype._oq1 = originalIslandSolve;
 			stopReplay();
 			state.exactCheckpointMode = false;
 		}
@@ -4771,23 +5210,144 @@
 		const normalized = normalizeScript(script);
 		const inspection = inspectCompactPhysics(normalized, options, snapshotFrame);
 		if (!inspection || (inspection.prepared && !inspection.prepared.ready)) {
-			return { inspection, boundaryStates: [], times: [] };
+			return { inspection, boundaryStates: [], bodySpawnEvents: [], times: [] };
 		}
 		const trace = traceCompactPhysics(
 			normalized,
 			{
 				...options,
 				boundaryOnly: true,
-				solverStartFrame: endFrame + 1,
-				solverEndFrame: endFrame + 1,
-				solverChildren: []
+				resumeCurrentState: true
 			},
 			snapshotFrame,
 			endFrame
 		);
+		const referenceTrace = options.captureReferenceFrames
+			? traceCompactPhysics(
+				normalized,
+				{
+					...options,
+					boundaryOnly: false,
+					resumeCurrentState: false
+				},
+				snapshotFrame,
+				endFrame
+			)
+			: null;
+		const configurationTrace = referenceTrace || traceCompactPhysics(
+			normalized,
+			{
+				...options,
+				boundaryOnly: true,
+				resumeCurrentState: false
+			},
+			snapshotFrame,
+			endFrame
+		);
+		const referenceFrames = referenceTrace && Array.isArray(referenceTrace.frames)
+			? referenceTrace.frames
+			: [];
+		const referenceFrameByNumber = new Map(
+			referenceFrames.map((frame) => [Number(frame && frame.frame), frame])
+		);
+		const bodySpawnEvents = trace && Array.isArray(trace.bodySpawnEvents)
+			? trace.bodySpawnEvents.map((event) => {
+				const instanceIds = new Set(
+					(event.bodies || []).map((body) => Number(body && body.userId))
+				);
+				const referenceFrame = referenceFrames.find((frame) => {
+					const visible = new Set(
+						(frame.physicsBodies || []).map((body) => Number(body && body.instanceId))
+					);
+					return Array.from(instanceIds).every((instanceId) => visible.has(instanceId));
+				}) || referenceFrameByNumber.get(Number(event && event.frame));
+				if (!referenceFrame) return event;
+				const referenceBodies = new Map(
+					(referenceFrame.physicsBodies || []).map((body) => [Number(body && body.instanceId), body])
+				);
+				return {
+					...event,
+					frame: Number(referenceFrame.frame),
+					exactFrame: true,
+					contacts: (referenceFrame.physicsContactStates || []).filter((contact) =>
+						instanceIds.has(Number(contact && contact.bodyAInstanceId)) ||
+						instanceIds.has(Number(contact && contact.bodyBInstanceId))
+					).filter((contact) => contact.manifold && contact.manifold.points.length),
+					bodies: (event.bodies || []).map((body) => {
+						const reference = referenceBodies.get(Number(body && body.userId));
+						if (!reference) return body;
+						return {
+							...body,
+							position: { x: Number(reference.x), y: Number(reference.y) },
+							angle: Number(reference.angle),
+							linearVelocity: { x: Number(reference.vx), y: Number(reference.vy) },
+							angularVelocity: Number(reference.angularVelocity),
+							sleepTime: Number(reference.sleepTime),
+							mass: Number(reference.mass),
+							inverseMass: Number(reference.inverseMass),
+							inertia: Number(reference.inertia),
+							inverseInertia: Number(reference.inverseInertia),
+							localCenter: {
+								x: Number(reference.localCenterX),
+								y: Number(reference.localCenterY)
+							},
+							allowSleep: (Number(reference.flags) & 1) !== 0,
+							awake: (Number(reference.flags) & 2) !== 0,
+							active: (Number(reference.flags) & 4) !== 0,
+							bullet: (Number(reference.flags) & 8) !== 0,
+							fixedRotation: (Number(reference.flags) & 16) !== 0
+						};
+					})
+				};
+			})
+			: [];
+		const jointSpawnEvents = trace && Array.isArray(trace.jointSpawnEvents)
+			? trace.jointSpawnEvents.map((event) => {
+				const keys = new Set((event.joints || []).map(physicsJointDefinitionKey));
+				const referenceFrame = referenceFrames.find((frame) => {
+					const visible = new Set(
+						(frame.physicsJointDefinitions || []).map(physicsJointDefinitionKey)
+					);
+					return Array.from(keys).every((key) => visible.has(key));
+				}) || referenceFrameByNumber.get(Number(event && event.frame));
+				if (!referenceFrame) return event;
+				const referenceJoints = new Map(
+					(referenceFrame.physicsJointDefinitions || []).map((joint) => [
+						physicsJointDefinitionKey(joint),
+						joint
+					])
+				);
+				const endpointIds = new Set();
+				for (const joint of event.joints || []) {
+					endpointIds.add(Number(joint && joint.bodyAId));
+					endpointIds.add(Number(joint && joint.bodyBId));
+				}
+				return {
+					...event,
+					frame: Number(referenceFrame.frame),
+					bodyStates: (referenceFrame.physicsBodies || []).filter((body) =>
+						endpointIds.has(Number(body && body.instanceId))
+					),
+					joints: (event.joints || []).map((joint) =>
+						referenceJoints.get(physicsJointDefinitionKey(joint)) || joint
+					)
+				};
+			})
+			: [];
 		return {
 			inspection,
 			boundaryStates: trace && Array.isArray(trace.boundaryStates) ? trace.boundaryStates : [],
+			bodySpawnEvents,
+			bodyDestroyEvents: trace && Array.isArray(trace.bodyDestroyEvents) ? trace.bodyDestroyEvents : [],
+			bodyUpdateEvents: configurationTrace && Array.isArray(configurationTrace.bodyUpdateEvents)
+				? configurationTrace.bodyUpdateEvents
+				: [],
+			jointSpawnEvents,
+			jointDestroyEvents: trace && Array.isArray(trace.jointDestroyEvents)
+				? trace.jointDestroyEvents
+				: [],
+			referenceFrames,
+			initialStepOverrides: trace && Array.isArray(trace.initialStepOverrides) ? trace.initialStepOverrides : [],
 			times: trace && Array.isArray(trace.times) ? trace.times : []
 		};
 	}

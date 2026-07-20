@@ -102,6 +102,20 @@ public:
 		m_limitState = limitState;
 	}
 
+	void GetCapturedSolverState(
+		float32& impulseX,
+		float32& impulseY,
+		float32& impulseZ,
+		float32& motorImpulse,
+		b2LimitState& limitState
+	) const {
+		impulseX = m_impulse.x;
+		impulseY = m_impulse.y;
+		impulseZ = m_impulse.z;
+		motorImpulse = m_motorImpulse;
+		limitState = m_limitState;
+	}
+
 	b2Vec2 GetAnchorA() const;
 	b2Vec2 GetAnchorB() const;
 

@@ -58,6 +58,12 @@ struct ModelBody {
     double angular_damping = 0.0;
     double gravity_scale = 1.0;
     double sleep_time = 0.0;
+    double mass = 0.0;
+    double inverse_mass = 0.0;
+    double inertia = 0.0;
+    double inverse_inertia = 0.0;
+    ModelVec2 local_center{};
+    bool has_captured_mass_state = false;
     bool allow_sleep = true;
     bool awake = true;
     bool active = true;
@@ -90,6 +96,8 @@ struct ModelJoint {
     ModelJointType type = ModelJointType::Revolute;
     std::int32_t body_a_index = -1;
     std::int32_t body_b_index = -1;
+    std::int32_t body_a_instance_id = -1;
+    std::int32_t body_b_instance_id = -1;
     ModelVec2 anchor_a{};
     ModelVec2 anchor_b{};
     ModelVec2 local_anchor_a{};
@@ -107,6 +115,12 @@ struct ModelJoint {
     bool collide_connected = false;
     bool enable_limit = false;
     bool enable_motor = false;
+};
+
+struct ModelJointKey {
+    ModelJointType type = ModelJointType::Revolute;
+    std::int32_t body_a_instance_id = -1;
+    std::int32_t body_b_instance_id = -1;
 };
 
 struct ModelContactPoint {
@@ -136,11 +150,66 @@ struct ModelContact {
     std::int32_t point_count = 0;
 };
 
+struct ModelInstanceContact {
+    std::int32_t body_a_instance_id = -1;
+    std::int32_t fixture_a_index = -1;
+    std::int32_t child_a = 0;
+    std::int32_t body_b_instance_id = -1;
+    std::int32_t fixture_b_index = -1;
+    std::int32_t child_b = 0;
+    std::uint32_t flags = 0;
+    double friction = 0.0;
+    double restitution = 0.0;
+    double tangent_speed = 0.0;
+    std::int32_t toi_count = 0;
+    double toi = 0.0;
+    std::array<ModelContactPoint, 2> points{};
+    std::int32_t point_count = 0;
+};
+
 struct ModelWorldPatch {
     std::int32_t boundary_radius_pixels = 0;
     std::int32_t replace_body_index = -1;
     std::vector<ModelFixture> replacement_fixtures{};
     std::vector<ModelBody> spawned_bodies{};
+};
+
+struct ModelCheckpointPatch {
+    std::int32_t checkpoint = 0;
+    std::vector<ModelBody> spawned_bodies{};
+};
+
+struct ModelBodyUpdate {
+    std::int32_t instance_id = -1;
+    std::int32_t type = 0;
+    double linear_damping = 0.0;
+    double angular_damping = 0.0;
+    double gravity_scale = 1.0;
+    bool allow_sleep = true;
+    bool awake = true;
+    bool active = true;
+    bool bullet = false;
+    bool fixed_rotation = false;
+};
+
+struct ModelBodyStateUpdate {
+    std::int32_t instance_id = -1;
+    ModelVec2 position{};
+    double angle = 0.0;
+    ModelVec2 linear_velocity{};
+    double angular_velocity = 0.0;
+    double sleep_time = 0.0;
+};
+
+struct ModelFramePatch {
+    std::int32_t frame = 0;
+    std::vector<ModelBody> spawned_bodies{};
+    std::vector<std::int32_t> destroyed_instance_ids{};
+    std::vector<ModelBodyUpdate> body_updates{};
+    std::vector<ModelBodyStateUpdate> body_state_updates{};
+    std::vector<ModelInstanceContact> contacts{};
+    std::vector<ModelJoint> spawned_joints{};
+    std::vector<ModelJointKey> destroyed_joints{};
 };
 
 struct ModelWorldSettings {
@@ -187,6 +256,8 @@ struct RuntimeModel {
     std::vector<ModelContact> contacts{};
     std::vector<ModelJoint> joints{};
     std::vector<ModelCollectible> collectibles{};
+    std::vector<ModelCheckpointPatch> checkpoint_patches{};
+    std::vector<ModelFramePatch> frame_patches{};
     std::vector<ModelWorldPatch> growth_patches{};
 };
 

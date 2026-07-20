@@ -47,23 +47,30 @@ RuntimeSimulator::RuntimeSimulator(const RuntimeModel& model)
     world_.SetPreviousInverseTimeStep(model.world.step_rate);
 
     std::size_t maximum_body_count = model.bodies.size();
+    for (const ModelCheckpointPatch& patch : model.checkpoint_patches) {
+        maximum_body_count += patch.spawned_bodies.size();
+    }
+    for (const ModelFramePatch& patch : model.frame_patches) {
+        maximum_body_count += patch.spawned_bodies.size();
+    }
     for (const ModelWorldPatch& patch : model.growth_patches) {
         maximum_body_count += patch.spawned_bodies.size();
     }
     tags_.resize(maximum_body_count);
     bodies_.reserve(maximum_body_count);
+    initial_bodies_.reserve(model.bodies.size());
 
     for (const ModelBody& body : model.bodies) {
-        CreateBody(body);
+        initial_bodies_.push_back(CreateBody(body));
     }
     for (const ModelJoint& joint : model.joints) {
-        CreateJoint(joint);
+        joints_.push_back(CreateJoint(joint));
     }
     if (model.player.body_index < 0 ||
-        static_cast<std::size_t>(model.player.body_index) >= bodies_.size()) {
+        static_cast<std::size_t>(model.player.body_index) >= initial_bodies_.size()) {
         InvalidModel();
     }
-    player_ = bodies_[static_cast<std::size_t>(model.player.body_index)];
+    player_ = initial_bodies_[static_cast<std::size_t>(model.player.body_index)];
     world_.InitializeSnapshotContacts();
     RestoreBodyKinematics();
     RestoreContacts();
@@ -77,6 +84,14 @@ RuntimeSimulator::RuntimeSimulator(const RuntimeModel& model)
     for (std::size_t index = 0; index < model.collectibles.size(); ++index) {
         state_.collected[index] = model.collectibles[index].collected ? 1U : 0U;
     }
+    while (next_checkpoint_patch_ < model.checkpoint_patches.size() &&
+           model.checkpoint_patches[next_checkpoint_patch_].checkpoint <= state_.checkpoint) {
+        ++next_checkpoint_patch_;
+    }
+    while (next_frame_patch_ < model.frame_patches.size() &&
+           model.frame_patches[next_frame_patch_].frame <= state_.frame) {
+        ++next_frame_patch_;
+    }
     while (next_growth_patch_ < model.growth_patches.size() &&
            model.growth_patches[next_growth_patch_].boundary_radius_pixels <=
                state_.boundary_radius_pixels) {
@@ -89,23 +104,42 @@ b2Fixture* RuntimeSimulator::FixtureAt(
     std::int32_t fixture_index
 ) {
     if (body_index < 0 || fixture_index < 0 ||
-        static_cast<std::size_t>(body_index) >= bodies_.size()) {
+        static_cast<std::size_t>(body_index) >= initial_bodies_.size()) {
         return nullptr;
     }
-    b2Fixture* fixture = bodies_[static_cast<std::size_t>(body_index)]->GetFixtureList();
+    return FixtureAt(initial_bodies_[static_cast<std::size_t>(body_index)], fixture_index);
+}
+
+b2Fixture* RuntimeSimulator::FixtureAt(
+    b2Body* body,
+    std::int32_t fixture_index
+) {
+    if (!body || fixture_index < 0) return nullptr;
+    b2Fixture* fixture = body->GetFixtureList();
     for (std::int32_t index = 0; fixture && index < fixture_index; ++index) {
         fixture = fixture->GetNext();
     }
     return fixture;
 }
 
+b2Body* RuntimeSimulator::FindBodyByInstanceId(std::int32_t instance_id) {
+    for (b2Body* body : bodies_) {
+        const auto* tag = body
+            ? static_cast<const InstanceTag*>(body->GetUserData())
+            : nullptr;
+        if (body && tag && tag->id == instance_id) return body;
+    }
+    return nullptr;
+}
+
 void RuntimeSimulator::RestoreBodyKinematics() {
-    if (model_.bodies.size() > bodies_.size()) {
+    if (model_.bodies.size() > initial_bodies_.size()) {
         InvalidModel();
     }
     for (std::size_t index = 0; index < model_.bodies.size(); ++index) {
         const ModelBody& source = model_.bodies[index];
-        b2Body* body = bodies_[index];
+        b2Body* body = initial_bodies_[index];
+        if (!body) InvalidModel();
         body->SetAwake(source.awake);
         body->SetLinearVelocity(b2Vec2(source.linear_velocity.x, source.linear_velocity.y));
         body->SetAngularVelocity(source.angular_velocity);
@@ -160,14 +194,92 @@ void RuntimeSimulator::RestoreContacts() {
     }
 }
 
-b2Joint* RuntimeSimulator::CreateJoint(const ModelJoint& source) {
-    if (source.body_a_index < 0 || source.body_b_index < 0 ||
-        static_cast<std::size_t>(source.body_a_index) >= bodies_.size() ||
-        static_cast<std::size_t>(source.body_b_index) >= bodies_.size()) {
-        InvalidModel();
+void RuntimeSimulator::RestoreInstanceContacts(
+    const std::vector<ModelInstanceContact>& contacts
+) {
+    std::vector<ModelInstanceContact> unresolved;
+    for (const ModelInstanceContact& source : contacts) {
+        b2Fixture* fixture_a = FixtureAt(
+            FindBodyByInstanceId(source.body_a_instance_id),
+            source.fixture_a_index
+        );
+        b2Fixture* fixture_b = FixtureAt(
+            FindBodyByInstanceId(source.body_b_instance_id),
+            source.fixture_b_index
+        );
+        if (!fixture_a || !fixture_b) {
+            unresolved.push_back(source);
+            continue;
+        }
+
+        b2Contact* matched = nullptr;
+        for (b2Contact* contact = world_.GetContactList(); contact; contact = contact->GetNext()) {
+            if (contact->GetFixtureA() == fixture_a &&
+                contact->GetChildIndexA() == source.child_a &&
+                contact->GetFixtureB() == fixture_b &&
+                contact->GetChildIndexB() == source.child_b) {
+                matched = contact;
+                break;
+            }
+        }
+        if (!matched) {
+            unresolved.push_back(source);
+            continue;
+        }
+
+        std::uint32_t ids[2]{};
+        double normal_impulses[2]{};
+        double tangent_impulses[2]{};
+        for (std::int32_t index = 0; index < source.point_count; ++index) {
+            const ModelContactPoint& point = source.points[static_cast<std::size_t>(index)];
+            ids[index] = point.id;
+            normal_impulses[index] = point.normal_impulse;
+            tangent_impulses[index] = point.tangent_impulse;
+        }
+        matched->SetCapturedSolverState(
+            source.flags,
+            source.friction,
+            source.restitution,
+            source.tangent_speed,
+            source.toi_count,
+            source.toi,
+            source.point_count,
+            ids,
+            normal_impulses,
+            tangent_impulses
+        );
     }
-    b2Body* body_a = bodies_[static_cast<std::size_t>(source.body_a_index)];
-    b2Body* body_b = bodies_[static_cast<std::size_t>(source.body_b_index)];
+    pending_instance_contacts_.insert(
+        pending_instance_contacts_.end(),
+        unresolved.begin(),
+        unresolved.end()
+    );
+}
+
+void RuntimeSimulator::RetryPendingInstanceContacts() {
+    if (pending_instance_contacts_.empty()) return;
+    std::vector<ModelInstanceContact> contacts;
+    contacts.swap(pending_instance_contacts_);
+    world_.InitializeSnapshotContacts();
+    RestoreInstanceContacts(contacts);
+}
+
+b2Joint* RuntimeSimulator::CreateJoint(const ModelJoint& source) {
+    b2Body* body_a = nullptr;
+    b2Body* body_b = nullptr;
+    if (source.body_a_index >= 0 &&
+        static_cast<std::size_t>(source.body_a_index) < initial_bodies_.size()) {
+        body_a = initial_bodies_[static_cast<std::size_t>(source.body_a_index)];
+    } else {
+        body_a = FindBodyByInstanceId(source.body_a_instance_id);
+    }
+    if (source.body_b_index >= 0 &&
+        static_cast<std::size_t>(source.body_b_index) < initial_bodies_.size()) {
+        body_b = initial_bodies_[static_cast<std::size_t>(source.body_b_index)];
+    } else {
+        body_b = FindBodyByInstanceId(source.body_b_instance_id);
+    }
+    if (!body_a || !body_b) InvalidModel();
 
     switch (source.type) {
         case ModelJointType::Revolute: {
@@ -242,6 +354,21 @@ b2Body* RuntimeSimulator::CreateBody(const ModelBody& source) {
     bodies_.push_back(body);
     for (const ModelFixture& fixture : source.fixtures) {
         CreateFixture(*body, fixture);
+    }
+    if (source.has_captured_mass_state) {
+        body->SetCapturedMassState(
+            source.mass,
+            source.inverse_mass,
+            source.inertia,
+            source.inverse_inertia,
+            b2Vec2(source.local_center.x, source.local_center.y)
+        );
+        // Setting the captured center of mass changes the derived world center.
+        // Restore the captured velocities after that structural update.
+        body->SetLinearVelocity(
+            b2Vec2(source.linear_velocity.x, source.linear_velocity.y)
+        );
+        body->SetAngularVelocity(source.angular_velocity);
     }
     body->SetSleepTime(source.sleep_time);
     return body;
@@ -348,15 +475,136 @@ void RuntimeSimulator::ReplaceFixtures(
 void RuntimeSimulator::ApplyGrowthPatch(const ModelWorldPatch& patch) {
     if (patch.replace_body_index >= 0) {
         const std::size_t index = static_cast<std::size_t>(patch.replace_body_index);
-        if (index >= bodies_.size()) {
+        if (index >= initial_bodies_.size() || !initial_bodies_[index]) {
             InvalidModel();
         }
-        ReplaceFixtures(*bodies_[index], patch.replacement_fixtures);
+        ReplaceFixtures(*initial_bodies_[index], patch.replacement_fixtures);
     }
     for (const ModelBody& body : patch.spawned_bodies) {
-        CreateBody(body);
+        pending_growth_bodies_.push_back(&body);
     }
     state_.boundary_radius_pixels = patch.boundary_radius_pixels;
+}
+
+void RuntimeSimulator::ApplyCheckpointPatches() {
+    while (next_checkpoint_patch_ < model_.checkpoint_patches.size()) {
+        const ModelCheckpointPatch& patch = model_.checkpoint_patches[next_checkpoint_patch_];
+        if (patch.checkpoint > state_.checkpoint) {
+            return;
+        }
+        for (const ModelBody& body : patch.spawned_bodies) {
+            CreateBody(body);
+        }
+        ++next_checkpoint_patch_;
+    }
+}
+
+void RuntimeSimulator::ApplyFramePatches(std::int32_t next_frame) {
+    while (next_frame_patch_ < model_.frame_patches.size()) {
+        const ModelFramePatch& patch = model_.frame_patches[next_frame_patch_];
+        if (patch.frame > next_frame) {
+            return;
+        }
+        for (std::int32_t instance_id : patch.destroyed_instance_ids) {
+            DestroyBodyByInstanceId(instance_id);
+        }
+        for (const ModelJointKey& key : patch.destroyed_joints) {
+            DestroyJoint(key);
+        }
+        for (const ModelBody& body : patch.spawned_bodies) {
+            CreateBody(body);
+        }
+        for (const ModelJoint& joint : patch.spawned_joints) {
+            joints_.push_back(CreateJoint(joint));
+        }
+        for (const ModelBodyStateUpdate& update : patch.body_state_updates) {
+            ApplyBodyStateUpdate(update);
+        }
+        for (const ModelBodyUpdate& update : patch.body_updates) {
+            ApplyBodyUpdate(update);
+        }
+        pending_instance_contacts_.insert(
+            pending_instance_contacts_.end(),
+            patch.contacts.begin(),
+            patch.contacts.end()
+        );
+        ++next_frame_patch_;
+    }
+}
+
+void RuntimeSimulator::ApplyBodyUpdate(const ModelBodyUpdate& update) {
+    for (b2Body* body : bodies_) {
+        const auto* tag = body
+            ? static_cast<const InstanceTag*>(body->GetUserData())
+            : nullptr;
+        if (!body || !tag || tag->id != update.instance_id) continue;
+
+        body->SetType(BodyType(update.type));
+        body->SetLinearDamping(update.linear_damping);
+        body->SetAngularDamping(update.angular_damping);
+        body->SetGravityScale(update.gravity_scale);
+        body->SetSleepingAllowed(update.allow_sleep);
+        body->SetBullet(update.bullet);
+        body->SetFixedRotation(update.fixed_rotation);
+        body->SetActive(update.active);
+        body->SetAwake(update.awake);
+        return;
+    }
+    InvalidModel();
+}
+
+void RuntimeSimulator::ApplyBodyStateUpdate(const ModelBodyStateUpdate& update) {
+    b2Body* body = FindBodyByInstanceId(update.instance_id);
+    if (!body) InvalidModel();
+    body->SetTransform(
+        b2Vec2(update.position.x, update.position.y),
+        update.angle
+    );
+    body->SetLinearVelocity(
+        b2Vec2(update.linear_velocity.x, update.linear_velocity.y)
+    );
+    body->SetAngularVelocity(update.angular_velocity);
+    body->SetSleepTime(update.sleep_time);
+}
+
+void RuntimeSimulator::DestroyJoint(const ModelJointKey& key) {
+    for (auto iterator = joints_.begin(); iterator != joints_.end(); ++iterator) {
+        b2Joint* joint = *iterator;
+        if (!joint || static_cast<std::int32_t>(joint->GetType()) != static_cast<std::int32_t>(key.type)) {
+            continue;
+        }
+        const auto* tag_a = joint->GetBodyA()
+            ? static_cast<const InstanceTag*>(joint->GetBodyA()->GetUserData())
+            : nullptr;
+        const auto* tag_b = joint->GetBodyB()
+            ? static_cast<const InstanceTag*>(joint->GetBodyB()->GetUserData())
+            : nullptr;
+        if (!tag_a || !tag_b ||
+            tag_a->id != key.body_a_instance_id ||
+            tag_b->id != key.body_b_instance_id) {
+            continue;
+        }
+        world_.DestroyJoint(joint);
+        joints_.erase(iterator);
+        return;
+    }
+}
+
+void RuntimeSimulator::DestroyBodyByInstanceId(std::int32_t instance_id) {
+    for (auto iterator = bodies_.begin(); iterator != bodies_.end(); ++iterator) {
+        b2Body* body = *iterator;
+        const auto* tag = body
+            ? static_cast<const InstanceTag*>(body->GetUserData())
+            : nullptr;
+        if (!body || !tag || tag->id != instance_id) continue;
+        if (body == player_) InvalidModel();
+        for (b2Body*& initial : initial_bodies_) {
+            if (initial == body) initial = nullptr;
+        }
+        world_.DestroyBody(body);
+        bodies_.erase(iterator);
+        return;
+    }
 }
 
 void RuntimeSimulator::AdvanceGrowthAlarm() {
@@ -398,10 +646,10 @@ void RuntimeSimulator::CollectCurrentPosition() {
         double collectible_y = collectible.y_pixels;
         if (collectible.body_index >= 0) {
             const std::size_t body_index = static_cast<std::size_t>(collectible.body_index);
-            if (body_index >= bodies_.size()) {
+            if (body_index >= initial_bodies_.size() || !initial_bodies_[body_index]) {
                 InvalidModel();
             }
-            const b2Vec2 position = bodies_[body_index]->GetPosition();
+            const b2Vec2 position = initial_bodies_[body_index]->GetPosition();
             collectible_x = position.x * inverse_scale;
             collectible_y = position.y * inverse_scale;
         }
@@ -424,6 +672,7 @@ void RuntimeSimulator::CollectCurrentPosition() {
                 state_.checkpoint_frames[static_cast<std::size_t>(state_.checkpoint)] =
                     state_.frame + 1;
             }
+            ApplyCheckpointPatches();
         }
         if (
             collectible.starts_growth_alarm &&
@@ -470,12 +719,22 @@ void RuntimeSimulator::Step(std::uint8_t input) {
     AdvanceGrowthAlarm();
     CollectCurrentPosition();
     ApplyInput(input);
+    RetryPendingInstanceContacts();
     world_.Step(
         1.0 / model_.world.step_rate,
         model_.world.velocity_iterations,
         model_.world.position_iterations
     );
     world_.ClearForces();
+    for (const ModelBody* body : pending_growth_bodies_) {
+        if (!body) {
+            InvalidModel();
+        }
+        CreateBody(*body);
+    }
+    pending_growth_bodies_.clear();
+    ApplyFramePatches(state_.frame + 1);
+    RetryPendingInstanceContacts();
     ++state_.frame;
 }
 

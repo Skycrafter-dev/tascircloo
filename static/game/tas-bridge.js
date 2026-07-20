@@ -90,6 +90,8 @@
 		lastPlayer: null,
 		velocity: { vx: 0, vy: 0, speed: 0 },
 		volume: 0.8,
+		gameSpeed: 1,
+		rafAccumulator: 0,
 		runLog: [],
 		runLogStartedAt: Date.now(),
 		runLogReason: 'init',
@@ -206,23 +208,41 @@
 		W.__circlooTasFixedRaf = true;
 
 		let nextId = 1;
-		const timers = new Map();
+		let fallbackTimestamp = REAL.now();
+		let lastHostTimestamp = REAL.now();
+		const callbacks = new Map();
+
+		const runFrameStep = () => {
+			const queued = Array.from(callbacks.entries());
+			callbacks.clear();
+			if (!queued.length) return;
+			fallbackTimestamp += 1000 / FPS;
+			const timestamp = state.clockInstalled ? advanceDeterministicClock() : fallbackTimestamp;
+			for (const [, callback] of queued) callback(timestamp);
+		};
+
+		const hostTick = (hostTimestamp) => {
+			const now = Number.isFinite(hostTimestamp) ? hostTimestamp : REAL.now();
+			const elapsed = Math.max(0, Math.min(100, now - lastHostTimestamp));
+			lastHostTimestamp = now;
+			state.rafAccumulator += elapsed * (FPS / 1000) * state.gameSpeed;
+			const steps = Math.min(60, Math.floor(state.rafAccumulator));
+			state.rafAccumulator -= steps;
+			for (let step = 0; step < steps; step++) runFrameStep();
+			REAL.raf(hostTick);
+		};
 
 		W.requestAnimationFrame = (callback) => {
 			const id = nextId++;
-			const timer = REAL.setTimeout(() => {
-				timers.delete(id);
-				callback(state.clockInstalled ? advanceDeterministicClock() : REAL.now());
-			}, 1000 / FPS);
-			timers.set(id, timer);
+			callbacks.set(id, callback);
 			return id;
 		};
 
 		W.cancelAnimationFrame = (id) => {
-			const timer = timers.get(id);
-			if (timer != null) REAL.clearTimeout(timer);
-			timers.delete(id);
+			callbacks.delete(id);
 		};
+
+		REAL.raf(hostTick);
 	}
 
 	function parseInput(value) {
@@ -541,6 +561,7 @@
 	}
 
 	function shouldStepPhysics() {
+		if (state.paused) return false;
 		if (!freezeApplies()) return true;
 		syncFreezeLifecycle();
 		if (!hasPlayer()) return IS_SIM;
@@ -556,6 +577,7 @@
 	}
 
 	function shouldFreezeRoomUpdate() {
+		if (state.paused && hasPlayer()) return true;
 		if (!freezeApplies()) return false;
 		if (!hasPlayer()) return false;
 		syncFreezeLifecycle();
@@ -1431,6 +1453,26 @@
 		state.virtual = parseInput(input);
 	}
 
+	function seekPlaybackToFrame(frame) {
+		if (!state.playbackMode || !Number.isFinite(frame)) return;
+		const input = inputAtFrame(state.script, frame);
+		state.virtual = parseInput(input);
+		state.prevVirtual = parseInput(input);
+		state.consumedInput = input;
+		state.playLastFrame = frame;
+		state.inputLatchedFrame = frame;
+		state.playIndex = 0;
+		while (state.playIndex < state.script.length && state.script[state.playIndex].frame <= frame) {
+			state.playIndex++;
+		}
+	}
+
+	function updateReplayScript(script) {
+		state.script = normalizeScript(script);
+		if (state.playbackMode) seekPlaybackToFrame(gameFrame());
+		post('SCRIPT_NORMALIZED', { script: state.script, text: serializeScript(state.script) });
+	}
+
 	function resetPlayback(level = gmLevel()) {
 		state.playIndex = 0;
 		state.playLastFrame = -1;
@@ -1906,6 +1948,7 @@
 			captured: state.capture.length,
 			playbackMode: state.playbackMode,
 			paused: state.paused,
+			gameSpeed: state.gameSpeed,
 			sim: IS_SIM,
 			gameplayReady: canonicalGameplayReady(),
 			freeze: freezeSnapshot()
@@ -1943,6 +1986,15 @@
 		state.paused = !!paused;
 		state.inputLatchedFrame = null;
 		if (state.paused) setVirtualInput('.');
+		else if (state.playbackMode) seekPlaybackToFrame(gameFrame());
+	}
+
+	function setGameSpeed(value) {
+		const numeric = Number(value);
+		state.gameSpeed = IS_SIM || !Number.isFinite(numeric)
+			? 1
+			: Math.max(0, Math.min(10, numeric));
+		state.rafAccumulator = 0;
 	}
 
 	function seedGameplay(value = DEFAULT_GAMEPLAY_SEED) {
@@ -5383,8 +5435,11 @@
 
 		switch (message.type) {
 			case 'SET_SCRIPT':
-				state.script = normalizeScript(message.script ?? message.text);
-				post('SCRIPT_NORMALIZED', { script: state.script, text: serializeScript(state.script) });
+				updateReplayScript(message.script ?? message.text);
+				break;
+			case 'SET_GAME_SPEED':
+				setGameSpeed(message.speed);
+				post('TELEMETRY', telemetry());
 				break;
 			case 'ARM_REPLAY':
 				requestCanonicalReplay(message.script ?? message.text, {

@@ -77,13 +77,15 @@ const expression = `(async () => {
 	textarea.value = ${JSON.stringify(script)};
 	textarea.dispatchEvent(new Event('input', { bubbles: true }));
 	update(control('Level'), 1);
-	update(control('Target'), 'finish');
+	update(control('Type'), 'finish');
 	update(control('Finish CPs'), 7);
 	update(control('Max frames'), 660);
 	update(control('Modify from'), 300);
 	update(control('Modify through'), 0);
-	update(control('Mutation'), 8);
-	update(control('Step'), 1);
+	update(control('Add max inputs'), 1);
+	update(control('Remove max inputs'), 1);
+	update(control('Alter max inputs'), 1);
+	update(control('Alter time difference'), 8);
 	update(control('Warmup'), 0);
 	await wait(100);
 	const button = [...document.querySelectorAll('button')].find((node) => node.textContent.trim() === 'Bruteforce');

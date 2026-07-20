@@ -50,8 +50,7 @@ const expression = `(async () => {
 		maxFrames: 360,
 		minFrame: 100,
 		maxFrame: 0,
-		mutRange: 8,
-		mutStep: 1,
+		addMaxInputs: 1, removeMaxInputs: 1, alterMaxInputs: 1, alterTimeDifference: 8,
 		warmup: 0
 	};
 	const results = [];

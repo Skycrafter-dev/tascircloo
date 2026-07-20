@@ -49,7 +49,7 @@ const expression = `(async () => {
     for (let targetCP = ${firstCheckpoint}; targetCP <= ${lastCheckpoint}; targetCP += 1) {
       const settings = {
         target: 'cp', targetCP, finishCP: 6, maxFrames: 48,
-        minFrame: 0, maxFrame: 48, mutRange: 8, mutStep: 1, warmup: 0
+        minFrame: 0, maxFrame: 48, addMaxInputs: 1, removeMaxInputs: 1, alterMaxInputs: 1, alterTimeDifference: 8, warmup: 0
       };
       try {
         const result = await new Promise((resolve, reject) => {

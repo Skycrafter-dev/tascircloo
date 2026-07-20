@@ -25,6 +25,9 @@ assert.match(runtime, /addContact: requireExport\(exports, 'circloo_model_add_co
 assert.match(runtime, /playerTriggered: objectIndex === 21/);
 assert.match(bridge, /const contacts = \[\]/);
 assert.match(bridge, /normalImpulse: Number\(point && point\._6w1\)/);
-assert.match(html, /tas-bridge\.js\?v=67/);
+assert.match(bridge, /case 'SET_GAME_SPEED':/);
+assert.match(bridge, /function updateReplayScript\(/);
+assert.match(bridge, /state\.rafAccumulator \+= elapsed \* \(FPS \/ 1000\) \* state\.gameSpeed/);
+assert.match(html, /tas-bridge\.js\?v=68/);
 
 console.log('All-level custom engine support verified');

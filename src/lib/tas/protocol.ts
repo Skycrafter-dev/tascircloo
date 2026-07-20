@@ -18,6 +18,7 @@ export type Telemetry = {
 	captured: number;
 	playbackMode: boolean;
 	paused: boolean;
+	gameSpeed: number;
 	sim: boolean;
 	gameplayReady: boolean;
 	freeze?: {
@@ -102,8 +103,10 @@ export type BruteforceSettings = {
 	maxFrames: number;
 	minFrame: number;
 	maxFrame: number;
-	mutRange: number;
-	mutStep: number;
+	addMaxInputs: number;
+	removeMaxInputs: number;
+	alterMaxInputs: number;
+	alterTimeDifference: number;
 	warmup: number;
 	autoUseBest: boolean;
 };

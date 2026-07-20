@@ -120,6 +120,13 @@ export type MutationFrameBounds = {
 	maxFrames?: number;
 };
 
+export type ScriptMutationSettings = MutationFrameBounds & {
+	addMaxInputs?: number;
+	removeMaxInputs?: number;
+	alterMaxInputs?: number;
+	alterTimeDifference?: number;
+};
+
 function finiteFrame(value: unknown, fallback: number): number {
 	const n = Math.floor(Number(value));
 	return Number.isFinite(n) ? n : fallback;
@@ -148,34 +155,81 @@ function randomFrame(bounds: { min: number; max: number }): number {
 	return bounds.min + Math.floor(Math.random() * (bounds.max - bounds.min + 1));
 }
 
-function addMutableInput(script: ScriptEntry[], bounds: { min: number; max: number }, inputs: TasInput[]) {
-	script.push({
-		frame: randomFrame(bounds),
-		input: inputs[Math.floor(Math.random() * inputs.length)]
-	});
+function randomCount(maximum: number): number {
+	const max = Math.max(0, Math.floor(maximum));
+	return max > 0 ? 1 + Math.floor(Math.random() * max) : 0;
 }
 
-export function mutateScript(base: ScriptEntry[], range: number, step: number, frameBounds: MutationFrameBounds = {}): ScriptEntry[] {
+function differentInput(current: TasInput, inputs: TasInput[]): TasInput {
+	const alternatives = inputs.filter((input) => input !== current);
+	return alternatives[Math.floor(Math.random() * alternatives.length)] ?? current;
+}
+
+function takeRandomIndices(indices: number[], count: number): number[] {
+	const available = indices.slice();
+	const selected: number[] = [];
+	while (selected.length < count && available.length) {
+		selected.push(available.splice(Math.floor(Math.random() * available.length), 1)[0]);
+	}
+	return selected;
+}
+
+export function mutateScript(base: ScriptEntry[], settings: ScriptMutationSettings = {}): ScriptEntry[] {
 	const script = normalizeScript(base);
-
 	const inputs: TasInput[] = ['.', 'L', 'R', 'LR'];
-	const bounds = mutationBounds(script, frameBounds);
+	const bounds = mutationBounds(script, settings);
 	const indices = mutableIndices(script, bounds);
-	const op = Math.random();
+	const limits = {
+		add: Math.max(0, finiteFrame(settings.addMaxInputs, 1)),
+		remove: Math.max(0, finiteFrame(settings.removeMaxInputs, 1)),
+		alter: Math.max(0, finiteFrame(settings.alterMaxInputs, 1))
+	};
+	const available: Array<{ type: 'add' | 'remove' | 'alter'; weight: number }> = [];
+	if (limits.add > 0) available.push({ type: 'add', weight: 0.2 });
+	if (limits.remove > 0 && indices.length) available.push({ type: 'remove', weight: 0.1 });
+	if (limits.alter > 0 && indices.length) available.push({ type: 'alter', weight: 0.7 });
+	if (!available.length) return script;
 
-	if (op < 0.62 && indices.length) {
-		const i = indices[Math.floor(Math.random() * indices.length)];
-		const shift = (Math.floor(Math.random() * (range * 2 + 1)) - range) * step;
-		script[i] = { ...script[i], frame: clampMutationFrame(script[i].frame + shift, bounds) };
-	} else if (op < 0.82) {
-		addMutableInput(script, bounds, inputs);
-	} else if (op < 0.92 && indices.length) {
-		script.splice(indices[Math.floor(Math.random() * indices.length)], 1);
-	} else if (indices.length) {
-		const i = indices[Math.floor(Math.random() * indices.length)];
-		script[i] = { ...script[i], input: inputs[Math.floor(Math.random() * inputs.length)] };
+	const totalWeight = available.reduce((total, item) => total + item.weight, 0);
+	let choice = Math.random() * totalWeight;
+	const operation =
+		available.find((item) => ((choice -= item.weight) <= 0))?.type ?? available.at(-1)!.type;
+
+	if (operation === 'add') {
+		for (let count = randomCount(limits.add); count > 0; count--) {
+			script.push({
+				frame: randomFrame(bounds),
+				input: inputs[Math.floor(Math.random() * inputs.length)]
+			});
+		}
+	} else if (operation === 'remove') {
+		const selected = takeRandomIndices(
+			indices,
+			randomCount(Math.min(limits.remove, indices.length))
+		);
+		for (const index of selected.sort((left, right) => right - left)) script.splice(index, 1);
 	} else {
-		addMutableInput(script, bounds, inputs);
+		const timeDifference = Math.max(0, finiteFrame(settings.alterTimeDifference, 8));
+		const selected = takeRandomIndices(
+			indices,
+			randomCount(Math.min(limits.alter, indices.length))
+		);
+		for (const index of selected) {
+			const current = script[index];
+			const alterTime = timeDifference > 0 && Math.random() < 0.72;
+			const alterInput = !alterTime || Math.random() < 0.35;
+			let frame = current.frame;
+			let input = current.input;
+			if (alterTime) {
+				const magnitude = 1 + Math.floor(Math.random() * timeDifference);
+				frame = clampMutationFrame(
+					frame + (Math.random() < 0.5 ? -magnitude : magnitude),
+					bounds
+				);
+			}
+			if (alterInput || frame === current.frame) input = differentInput(input, inputs);
+			script[index] = { frame, input };
+		}
 	}
 
 	return normalizeScript(script);

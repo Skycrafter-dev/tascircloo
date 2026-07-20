@@ -434,29 +434,82 @@
 		return bounds.min + Math.floor(random() * (bounds.max - bounds.min + 1));
 	}
 
-	function addMutableInput(script, bounds, inputs, random) {
-		script.push({ frame: randomFrame(bounds, random), input: inputs[Math.floor(random() * inputs.length)] });
+	function randomMutationCount(maximum, random) {
+		const max = Math.max(0, finiteFrame(maximum, 0));
+		return max > 0 ? 1 + Math.floor(random() * max) : 0;
 	}
 
-	function mutateScript(base, range, step, settings, random) {
+	function differentMutationInput(current, inputs, random) {
+		const alternatives = inputs.filter((input) => input !== current);
+		return alternatives[Math.floor(random() * alternatives.length)] || current;
+	}
+
+	function takeRandomMutationIndices(indices, count, random) {
+		const available = indices.slice();
+		const selected = [];
+		while (selected.length < count && available.length) {
+			selected.push(available.splice(Math.floor(random() * available.length), 1)[0]);
+		}
+		return selected;
+	}
+
+	function mutateScript(base, settings, random) {
 		const script = normalizeScript(base);
 		const inputs = ['.', 'L', 'R', 'LR'];
 		const bounds = mutationBounds(settings);
 		const indices = mutableIndices(script, bounds);
-		const op = random();
-		if (op < 0.62 && indices.length) {
-			const i = indices[Math.floor(random() * indices.length)];
-			const shift = (Math.floor(random() * (range * 2 + 1)) - range) * step;
-			script[i] = { ...script[i], frame: clampMutationFrame(script[i].frame + shift, bounds) };
-		} else if (op < 0.82) {
-			addMutableInput(script, bounds, inputs, random);
-		} else if (op < 0.92 && indices.length) {
-			script.splice(indices[Math.floor(random() * indices.length)], 1);
-		} else if (indices.length) {
-			const i = indices[Math.floor(random() * indices.length)];
-			script[i] = { ...script[i], input: inputs[Math.floor(random() * inputs.length)] };
+		const limits = {
+			add: Math.max(0, finiteFrame(settings && settings.addMaxInputs, 1)),
+			remove: Math.max(0, finiteFrame(settings && settings.removeMaxInputs, 1)),
+			alter: Math.max(0, finiteFrame(settings && settings.alterMaxInputs, 1))
+		};
+		const available = [];
+		if (limits.add > 0) available.push({ type: 'add', weight: 0.2 });
+		if (limits.remove > 0 && indices.length) available.push({ type: 'remove', weight: 0.1 });
+		if (limits.alter > 0 && indices.length) available.push({ type: 'alter', weight: 0.7 });
+		if (!available.length) return script;
+
+		const totalWeight = available.reduce((total, item) => total + item.weight, 0);
+		let choice = random() * totalWeight;
+		const operation =
+			available.find((item) => ((choice -= item.weight) <= 0))?.type || available[available.length - 1].type;
+
+		if (operation === 'add') {
+			for (let count = randomMutationCount(limits.add, random); count > 0; count--) {
+				script.push({
+					frame: randomFrame(bounds, random),
+					input: inputs[Math.floor(random() * inputs.length)]
+				});
+			}
+		} else if (operation === 'remove') {
+			const selected = takeRandomMutationIndices(
+				indices,
+				randomMutationCount(Math.min(limits.remove, indices.length), random),
+				random
+			);
+			for (const index of selected.sort((left, right) => right - left)) script.splice(index, 1);
 		} else {
-			addMutableInput(script, bounds, inputs, random);
+			const timeDifference = Math.max(0, finiteFrame(settings && settings.alterTimeDifference, 8));
+			const selected = takeRandomMutationIndices(
+				indices,
+				randomMutationCount(Math.min(limits.alter, indices.length), random),
+				random
+			);
+			for (const index of selected) {
+				const current = script[index];
+				const alterTime = timeDifference > 0 && random() < 0.72;
+				const alterInput = !alterTime || random() < 0.35;
+				let frame = current.frame;
+				let input = current.input;
+				if (alterTime) {
+					const magnitude = 1 + Math.floor(random() * timeDifference);
+					frame = clampMutationFrame(frame + (random() < 0.5 ? -magnitude : magnitude), bounds);
+				}
+				if (alterInput || frame === current.frame) {
+					input = differentMutationInput(input, inputs, random);
+				}
+				script[index] = { frame, input };
+			}
 		}
 		return normalizeScript(script);
 	}
@@ -1090,7 +1143,7 @@
 			if (selectedIndex === 0 || entry.frame === 0) {
 				candidate[index].input = nextProbeInput(entry.input);
 			} else {
-				const step = Math.max(1, finiteFrame(settings && settings.mutStep, 1));
+				const step = Math.max(1, finiteFrame(settings && settings.alterTimeDifference, 1));
 				const forward = Math.min(bounds.max, entry.frame + step);
 				const backward = Math.max(bounds.min, entry.frame - step);
 				if (forward !== entry.frame) candidate[index].frame = forward;
@@ -1543,13 +1596,7 @@
 
 	function runOne() {
 		if (!running || !current) return;
-		const candidate = mutateScript(
-			current.best,
-			Math.max(0, current.settings.mutRange),
-			Math.max(1, current.settings.mutStep),
-			current.searchSettings,
-			nextRandom
-		);
+		const candidate = mutateScript(current.best, current.searchSettings, nextRandom);
 		let result = current.optimizer ? current.optimizer.evaluate(candidate) : trial(candidate);
 		current.trials += 1;
 

@@ -3,6 +3,7 @@
 	import {
 		ClipboardCopy,
 		FileDown,
+		Gauge,
 		Maximize2,
 		RefreshCcw,
 		Volume2,
@@ -28,6 +29,8 @@
 	const defaultText = '';
 	const scriptKey = 'circloo-tas:script';
 	const settingsKey = 'circloo-tas:bruteforce-settings';
+	const gameSpeedKey = 'circloo-tas:game-speed';
+	const gameSpeedStops = [0, 0.1, 0.25, 0.5, 1, 2, 3, 5, 10] as const;
 	const defaultBruteforceSettings = {
 		level: 1,
 		target: 'finish',
@@ -41,8 +44,10 @@
 		maxFrames: 520,
 		minFrame: 386,
 		maxFrame: 520,
-		mutRange: 8,
-		mutStep: 1,
+		addMaxInputs: 1,
+		removeMaxInputs: 1,
+		alterMaxInputs: 1,
+		alterTimeDifference: 8,
 		warmup: 0,
 		autoUseBest: false
 	} satisfies BruteforceSettings;
@@ -64,6 +69,8 @@
 	let retiredTrials = 0;
 	let gameRevision = $state(0);
 	let volume = $state(0.8);
+	let gameSpeed = $state(1);
+	let pendingReplayWhileFrozen = false;
 	let scriptText = $state(defaultText);
 	let errorText = $state('');
 	let toastText = $state('');
@@ -82,6 +89,7 @@
 		captured: 0,
 		playbackMode: false,
 		paused: false,
+		gameSpeed: 1,
 		sim: false,
 		gameplayReady: false
 	});
@@ -120,7 +128,7 @@
 	const scoredCPNumber = $derived(settings.target === 'cp' ? targetCPNumber : finishCPNumber);
 	const selectedTargetTime = $derived(telemetry.cpTimes[scoredCPNumber] ?? null);
 	const selectedTargetDisplay = $derived(
-		settings.target === 'point' ? 'See red point marker' : gameTime(selectedTargetTime)
+		settings.target === 'point' ? 'See red point marker' : checkpointTime(selectedTargetTime)
 	);
 	const targetLabel = $derived(
 		settings.target === 'cp'
@@ -147,13 +155,14 @@
 		})
 	);
 	const volumePercent = $derived(Math.round(volume * 100));
+	const gameSpeedDisplay = $derived(`${formatGameSpeed(gameSpeed)}×`);
 	const bruteforceRate = $derived(bruteforce.rate);
 	const bruteforceBestLabel = $derived(
 		settings.target === 'point'
 			? Number.isFinite(bruteforce.bestScore)
 				? `${formatDistance(bruteforce.bestScore)} px`
 				: '--'
-			: gameTime(bruteforce.bestScore)
+			: checkpointTime(bruteforce.bestScore)
 	);
 
 	function formatCoordinate(value: number) {
@@ -164,6 +173,16 @@
 		if (!Number.isFinite(value)) return '--';
 		if (value < 0.001) return value.toExponential(2);
 		return value.toFixed(value < 10 ? 4 : 2);
+	}
+
+	function checkpointTime(frame: number | null | undefined) {
+		return frame != null && Number.isFinite(Number(frame))
+			? `${gameTime(Number(frame))} · F${Math.floor(Number(frame))}`
+			: '--';
+	}
+
+	function formatGameSpeed(value: number) {
+		return Number(value.toFixed(2)).toString();
 	}
 
 	function postToGame(type: string, payload: Record<string, unknown> = {}) {
@@ -177,6 +196,31 @@
 
 	function handleVolumeInput(event: Event) {
 		setGameVolume(Number((event.currentTarget as HTMLInputElement).value));
+	}
+
+	function snappedGameSpeed(value: number) {
+		const clamped = Math.max(0, Math.min(10, Number.isFinite(value) ? value : 1));
+		let nearest: number = gameSpeedStops[0];
+		for (const stop of gameSpeedStops) {
+			if (Math.abs(stop - clamped) < Math.abs(nearest - clamped)) nearest = stop;
+		}
+		const threshold = nearest <= 1 ? 0.045 : 0.12;
+		return Math.abs(nearest - clamped) <= threshold ? nearest : Number(clamped.toFixed(2));
+	}
+
+	function setGameSpeed(nextSpeed: number) {
+		const wasFrozen = gameSpeed === 0;
+		gameSpeed = snappedGameSpeed(nextSpeed);
+		localStorage.setItem(gameSpeedKey, String(gameSpeed));
+		postToGame('SET_GAME_SPEED', { speed: gameSpeed });
+		if (wasFrozen && gameSpeed > 0 && pendingReplayWhileFrozen) {
+			pendingReplayWhileFrozen = false;
+			syncReplayFromEditor(scriptText, true);
+		}
+	}
+
+	function handleGameSpeedInput(event: Event) {
+		setGameSpeed(Number((event.currentTarget as HTMLInputElement).value));
 	}
 
 	function handleGameLoad() {
@@ -218,6 +262,15 @@
 			return;
 		}
 		if (!telemetry.ready) return;
+		if (telemetry.playbackMode && (telemetry.paused || gameSpeed === 0)) {
+			pendingReplayWhileFrozen = false;
+			postToGame('SET_SCRIPT', { script });
+			return;
+		}
+		if (telemetry.paused || gameSpeed === 0) {
+			pendingReplayWhileFrozen = true;
+			return;
+		}
 
 		const requestId = ++replayRequestId;
 		const start = () => {
@@ -306,9 +359,12 @@
 		return Number.isFinite(level) ? Math.max(0, level) : 1;
 	}
 
-	function normalizedBruteforceSettings(
-		value: Partial<BruteforceSettings>
-	): BruteforceSettings {
+	type LegacyBruteforceSettings = Partial<BruteforceSettings> & {
+		mutRange?: number;
+		mutStep?: number;
+	};
+
+	function normalizedBruteforceSettings(value: LegacyBruteforceSettings): BruteforceSettings {
 		const source = { ...defaultBruteforceSettings, ...value };
 		const finite = (candidate: unknown, fallback: number) => {
 			return typeof candidate === 'number' && Number.isFinite(candidate) ? candidate : fallback;
@@ -320,6 +376,7 @@
 				? source.target
 				: defaultBruteforceSettings.target;
 		const pointMinFrame = integer(source.pointMinFrame, defaultBruteforceSettings.pointMinFrame);
+		const legacyTimeDifference = integer(value.mutRange, 8) * integer(value.mutStep, 1, 1);
 		return {
 			level: integer(source.level, defaultBruteforceSettings.level),
 			target,
@@ -336,8 +393,15 @@
 			maxFrames: integer(source.maxFrames, defaultBruteforceSettings.maxFrames, 1),
 			minFrame: integer(source.minFrame, defaultBruteforceSettings.minFrame),
 			maxFrame: integer(source.maxFrame, defaultBruteforceSettings.maxFrame),
-			mutRange: integer(source.mutRange, defaultBruteforceSettings.mutRange),
-			mutStep: integer(source.mutStep, defaultBruteforceSettings.mutStep, 1),
+			addMaxInputs: integer(source.addMaxInputs, defaultBruteforceSettings.addMaxInputs),
+			removeMaxInputs: integer(source.removeMaxInputs, defaultBruteforceSettings.removeMaxInputs),
+			alterMaxInputs: integer(source.alterMaxInputs, defaultBruteforceSettings.alterMaxInputs),
+			alterTimeDifference: integer(
+				value.alterTimeDifference,
+				value.mutRange == null && value.mutStep == null
+					? defaultBruteforceSettings.alterTimeDifference
+					: legacyTimeDifference
+			),
 			warmup: Math.min(120, integer(source.warmup, defaultBruteforceSettings.warmup)),
 			autoUseBest: source.autoUseBest === true
 		};
@@ -347,7 +411,7 @@
 		try {
 			const raw = localStorage.getItem(settingsKey);
 			if (!raw) return;
-			const saved = JSON.parse(raw) as Partial<BruteforceSettings>;
+			const saved = JSON.parse(raw) as LegacyBruteforceSettings;
 			const isLegacyDefault =
 				saved.level === 1 &&
 				saved.target === 'cp' &&
@@ -650,6 +714,7 @@
 			case 'GAME_READY':
 				telemetry = message;
 				postToGame('SET_VOLUME', { volume });
+				postToGame('SET_GAME_SPEED', { speed: gameSpeed });
 				syncPointTarget();
 				syncReplayFromEditor(scriptText, true);
 				break;
@@ -664,11 +729,16 @@
 				}
 				break;
 			case 'TELEMETRY': {
+				const resumed = telemetry.paused && !message.paused;
 				const contextChanged =
 					telemetry.level !== message.level ||
 					telemetry.gameplayReady !== message.gameplayReady;
 				telemetry = message;
 				if (contextChanged) syncPointTarget();
+				if (resumed && pendingReplayWhileFrozen) {
+					pendingReplayWhileFrozen = false;
+					syncReplayFromEditor(scriptText, true);
+				}
 				break;
 			}
 			case 'POINT_TARGET_PICKED':
@@ -698,6 +768,7 @@
 
 	onMount(() => {
 		loadSettings();
+		gameSpeed = snappedGameSpeed(Number(localStorage.getItem(gameSpeedKey) ?? 1));
 		scriptText = localStorage.getItem(scriptKey) ?? defaultText;
 		window.addEventListener('message', handleGameMessage);
 		return () => {
@@ -732,7 +803,7 @@
 				{#each checkpointRows as row}
 					<div class:reached={row.frame != null}>
 						<span>{row.label}</span>
-						<strong>{gameTime(row.frame)}</strong>
+						<strong>{checkpointTime(row.frame)}</strong>
 					</div>
 				{/each}
 			</div>
@@ -742,6 +813,25 @@
 			<div class="game-shell" bind:this={gameShellEl}>
 				<iframe bind:this={iframeEl} title="CircloO game" src={gameUrl} onload={handleGameLoad}></iframe>
 				<div class="game-toolbar" aria-label="Game display controls">
+					<div class="speed-control" title={`Game speed ${gameSpeedDisplay}`}>
+						<Gauge size={16} />
+						<strong>{gameSpeedDisplay}</strong>
+						<input
+							type="range"
+							min="0"
+							max="10"
+							step="0.01"
+							list="game-speed-stops"
+							value={gameSpeed}
+							aria-label="Visible game speed"
+							oninput={handleGameSpeedInput}
+						/>
+						<datalist id="game-speed-stops">
+							{#each gameSpeedStops as stop}
+								<option value={stop}></option>
+							{/each}
+						</datalist>
+					</div>
 					<div class="volume-control" title={`Volume ${volumePercent}%`}>
 						{#if volume <= 0}
 							<VolumeX size={16} />
@@ -903,6 +993,10 @@
 
 					<section class="settings-section" aria-labelledby="input-modification-heading">
 						<h3 id="input-modification-heading">Input modification</h3>
+						<p class="settings-help">
+							Set a max to 0 to disable that mutation type. Alter time difference is the maximum
+							frame shift applied to each altered input.
+						</p>
 						<div class="settings-grid">
 							<label>
 								<span class="setting-label">Modify from</span>
@@ -913,12 +1007,20 @@
 								<input type="number" min="0" bind:value={settings.maxFrame} onchange={saveSettings} />
 							</label>
 							<label>
-								<span class="setting-label">Mutation</span>
-								<input type="number" min="0" bind:value={settings.mutRange} onchange={saveSettings} />
+								<span class="setting-label">Add max inputs</span>
+								<input type="number" min="0" bind:value={settings.addMaxInputs} onchange={saveSettings} />
 							</label>
 							<label>
-								<span class="setting-label">Step</span>
-								<input type="number" min="1" bind:value={settings.mutStep} onchange={saveSettings} />
+								<span class="setting-label">Remove max inputs</span>
+								<input type="number" min="0" bind:value={settings.removeMaxInputs} onchange={saveSettings} />
+							</label>
+							<label>
+								<span class="setting-label">Alter max inputs</span>
+								<input type="number" min="0" bind:value={settings.alterMaxInputs} onchange={saveSettings} />
+							</label>
+							<label>
+								<span class="setting-label">Alter time difference (frames)</span>
+								<input type="number" min="0" bind:value={settings.alterTimeDifference} onchange={saveSettings} />
 							</label>
 						</div>
 					</section>
@@ -1124,11 +1226,25 @@
 		border: 0;
 	}
 
+	.speed-control,
 	.volume-control {
 		display: flex;
 		align-items: center;
 		gap: 6px;
 		color: #efeadd;
+	}
+
+	.speed-control strong {
+		min-width: 34px;
+		font-size: 0.76rem;
+		font-variant-numeric: tabular-nums;
+		text-align: right;
+	}
+
+	.speed-control input {
+		width: 150px;
+		padding: 0;
+		accent-color: #e6b85c;
 	}
 
 	.volume-control input {
@@ -1294,6 +1410,13 @@
 		color: #e4ddcf;
 	}
 
+	.settings-help {
+		margin: -2px 0 9px;
+		color: #9d9789;
+		font-size: 0.76rem;
+		line-height: 1.4;
+	}
+
 	.point-picker-control {
 		display: flex;
 		flex-direction: column;
@@ -1405,6 +1528,17 @@
 
 		.game-shell {
 			min-height: 220px;
+		}
+
+		.game-toolbar {
+			left: 8px;
+			right: 8px;
+			flex-wrap: wrap;
+			justify-content: flex-end;
+		}
+
+		.speed-control input {
+			width: 110px;
 		}
 
 		.settings-grid {

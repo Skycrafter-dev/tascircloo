@@ -18,8 +18,7 @@ const settings = {
   maxFrames: 660,
   minFrame: 300,
   maxFrame: 0,
-  mutRange: 8,
-  mutStep: 1,
+  addMaxInputs: 1, removeMaxInputs: 1, alterMaxInputs: 1, alterTimeDifference: 8,
   warmup: 0
 };
 

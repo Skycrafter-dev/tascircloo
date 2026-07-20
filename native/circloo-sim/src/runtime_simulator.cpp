@@ -76,6 +76,8 @@ RuntimeSimulator::RuntimeSimulator(const RuntimeModel& model)
     RestoreContacts();
 
     state_.frame = model.lifecycle.initial_frame;
+    state_.timer_started =
+        model.lifecycle.initial_timer_started || model.lifecycle.initial_frame > 0;
     state_.checkpoint = model.lifecycle.initial_checkpoint;
     state_.growth_alarm = model.lifecycle.initial_growth_alarm;
     state_.boundary_radius_pixels = model.lifecycle.initial_boundary_radius_pixels;
@@ -630,7 +632,7 @@ void RuntimeSimulator::AdvanceGrowthAlarm() {
     }
 }
 
-void RuntimeSimulator::CollectCurrentPosition() {
+void RuntimeSimulator::CollectCurrentPosition(std::int32_t collection_frame) {
     const b2Vec2 player_position = player_->GetPosition();
     const double inverse_scale = 1.0 / model_.world.scale;
     const double player_x_pixels = player_position.x * inverse_scale;
@@ -672,7 +674,7 @@ void RuntimeSimulator::CollectCurrentPosition() {
                 static_cast<std::size_t>(state_.checkpoint) <
                     state_.checkpoint_frames.size()) {
                 state_.checkpoint_frames[static_cast<std::size_t>(state_.checkpoint)] =
-                    state_.frame + 1;
+                    collection_frame;
             }
             ApplyCheckpointPatches();
         }
@@ -718,9 +720,12 @@ void RuntimeSimulator::ApplyInput(std::uint8_t input) {
 }
 
 void RuntimeSimulator::Step(std::uint8_t input) {
+    const bool timer_started = state_.timer_started || (input & 3U) != 0U;
+    const std::int32_t next_frame = state_.frame + (timer_started ? 1 : 0);
     AdvanceGrowthAlarm();
-    CollectCurrentPosition();
+    CollectCurrentPosition(next_frame);
     ApplyInput(input);
+    state_.timer_started = timer_started;
     RetryPendingInstanceContacts();
     world_.Step(
         1.0 / model_.world.step_rate,
@@ -735,9 +740,9 @@ void RuntimeSimulator::Step(std::uint8_t input) {
         CreateBody(*body);
     }
     pending_growth_bodies_.clear();
-    ApplyFramePatches(state_.frame + 1);
+    ApplyFramePatches(next_frame);
     RetryPendingInstanceContacts();
-    ++state_.frame;
+    state_.frame = next_frame;
 }
 
 } // namespace circloo

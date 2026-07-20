@@ -548,10 +548,15 @@
 	}
 
 	function postError(error) {
+		const message = String(error && error.message ? error.message : error);
+		const stack = String(error && error.stack ? error.stack : '');
+		const detail = stack && !stack.includes(message)
+			? `${message}\n${stack}`
+			: stack || message;
 		W.postMessage({
 			source: 'circloo-tas-worker',
 			type: 'BRUTEFORCE_ERROR',
-			error: String(error && error.stack ? error.stack : error)
+			error: detail
 		});
 	}
 
@@ -1138,19 +1143,27 @@
 			return converted;
 		}
 
+		function nextSequenceInput(candidateScript, raw) {
+			const frame = finiteFrame(raw && raw.frame, snapshotFrame);
+			return inputBits(scriptInputAtFrame(candidateScript, frame));
+		}
+
+		function sequenceStepLimit(lastGameFrame) {
+			return Math.max(0, finiteFrame(lastGameFrame, snapshotFrame) - snapshotFrame);
+		}
+
 		function evaluatePointThrough(candidateScript, lastGameFrame, includePhysics = false) {
-			const inputs = encodeScriptInputs(
-				candidateScript,
-				snapshotFrame + 1,
-				lastGameFrame
-			);
 			const tracker = createPointTracker();
 			const trialStarted = realNow();
 			let raw = null;
 			try {
 				raw = runtime.beginSequence(includePhysics);
-				for (let index = 0; index < inputs.length; index += 1) {
-					raw = runtime.stepSequence(inputs[index], 32, includePhysics);
+				for (let index = 0; index < sequenceStepLimit(lastGameFrame); index += 1) {
+					raw = runtime.stepSequence(
+						nextSequenceInput(candidateScript, raw),
+						32,
+						includePhysics
+					);
 					sampleWasmPoint(raw, tracker);
 				}
 			} finally {
@@ -1171,6 +1184,28 @@
 				Math.min(maximumGameFrame, finiteFrame(requestedLastGameFrame, maximumGameFrame))
 			);
 			if (pointTarget) return evaluatePointThrough(candidateScript, lastGameFrame, false);
+			if (snapshotFrame === 0) {
+				const trialStarted = realNow();
+				let raw = null;
+				try {
+					raw = runtime.beginSequence(false);
+					for (let index = 0; index < sequenceStepLimit(lastGameFrame); index += 1) {
+						raw = runtime.stepSequence(
+							nextSequenceInput(candidateScript, raw),
+							checkpointTarget,
+							false
+						);
+						if (Math.max(0, finiteFrame(raw && raw.checkpoint, 0)) >= checkpointTarget) break;
+					}
+				} finally {
+					runtime.endSequence();
+				}
+				const elapsed = realNow() - trialStarted;
+				const converted = wasmTrialResult(raw, snapshotFrame, checkpointTarget);
+				converted.debug.trialMs = elapsed;
+				converted.debug.pumpMs = elapsed;
+				return converted;
+			}
 			const inputs = encodeScriptInputs(
 				candidateScript,
 				snapshotFrame + 1,
@@ -1192,16 +1227,12 @@
 		function beginFrameSequence(candidate) {
 			const candidateScript = normalizeScript(candidate);
 			if (!prefixMatches(candidateScript)) return null;
-			const inputs = encodeScriptInputs(
-				candidateScript,
-				snapshotFrame + 1,
-				maximumGameFrame
-			);
 			const raw = runtime.beginSequence(true);
 			const pointTracker = pointTarget ? createPointTracker() : null;
 			return {
-				inputs,
-				nextInputIndex: 0,
+				candidateScript,
+				raw,
+				remainingSteps: sequenceStepLimit(maximumGameFrame),
 				pointTracker,
 				result: pointTarget
 					? pointWasmTrialResult(raw, pointTracker)
@@ -1210,15 +1241,16 @@
 		}
 
 		function stepFrameSequence(sequence) {
-			if (!sequence || sequence.nextInputIndex >= sequence.inputs.length) {
+			if (!sequence || sequence.remainingSteps <= 0) {
 				return sequence && sequence.result;
 			}
 			const raw = runtime.stepSequence(
-				sequence.inputs[sequence.nextInputIndex],
+				nextSequenceInput(sequence.candidateScript, sequence.raw),
 				checkpointTarget,
 				true
 			);
-			sequence.nextInputIndex += 1;
+			sequence.raw = raw;
+			sequence.remainingSteps -= 1;
 			if (pointTarget) {
 				sampleWasmPoint(raw, sequence.pointTracker);
 				sequence.result = pointWasmTrialResult(raw, sequence.pointTracker);

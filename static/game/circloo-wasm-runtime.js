@@ -430,6 +430,7 @@
 			},
 			lifecycle: {
 				initialFrame: integer(inspection.frame),
+				initialTimerStarted: !!player.timerStarted,
 				initialCheckpoint: integer(inspection.cp),
 				initialGrowthAlarm: integer(big.growthAlarm, -1),
 				initialBoundaryRadiusPixels: integer(big.radius, 200),
@@ -929,6 +930,7 @@
 			const lifecycle = model.lifecycle || {};
 			abi.setLifecycle(
 				integer(lifecycle.initialFrame),
+				lifecycle.initialTimerStarted ? 1 : 0,
 				integer(lifecycle.initialCheckpoint),
 				integer(lifecycle.initialGrowthAlarm, -1),
 				integer(lifecycle.initialBoundaryRadiusPixels, 200),

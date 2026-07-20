@@ -56,7 +56,10 @@ const expression = `(async () => {
   const runs = [];
   for (let run = 0; run < ${runCount}; run += 1) {
     const result = await new Promise((resolve, reject) => {
-      const worker = new Worker('/game/bruteforce-worker.js?sim=1&v=repeatability-' + run + '-' + Date.now());
+      const worker = new Worker(
+        '/game/bruteforce-worker.js?sim=1&v=repeatability-' +
+        run + '-' + Date.now() + '-' + Math.random()
+      );
       const timer = setTimeout(() => {
         worker.terminate();
         reject(new Error('worker timeout on run ' + run));

@@ -13,6 +13,7 @@ The runtime model is not tied to a level number. It supports:
 - revolute and rope joints, including cached solver state;
 - deterministic contact ordering and contact warm-start snapshots;
 - player input rules;
+- the GameMaker run timer, which starts on the first left/right input;
 - collectible checkpoints;
 - delayed boundary replacement and body-spawn patches.
 
@@ -34,7 +35,8 @@ best is replayed in the original GameMaker runtime, and only that exact result
 can be accepted.
 
 The all-level target-mode matrix verifies `wasm-runtime` on all 20 levels for
-checkpoint, finish, and point searches: 60 combinations total.
+checkpoint, finish, standard point, and narrow-window idle point searches: 80
+combinations total.
 
 ## Build and test
 

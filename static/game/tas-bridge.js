@@ -4878,6 +4878,7 @@
 							x: Number(player.x),
 							y: Number(player.y),
 							radius: Number(player._jd),
+							timerStarted: !!player._Pt,
 							inputScale: Number(player._Ot) || 1,
 							extraInput: !!callGlobal('return !!(typeof global !== "undefined" && global && global._Fc);'),
 							fields: serial(player)

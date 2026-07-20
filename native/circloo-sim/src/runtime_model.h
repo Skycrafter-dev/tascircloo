@@ -236,6 +236,7 @@ struct ModelPlayerRules {
 
 struct ModelLifecycle {
     std::int32_t initial_frame = 0;
+    bool initial_timer_started = false;
     std::int32_t initial_checkpoint = 0;
     std::int32_t initial_growth_alarm = -1;
     std::int32_t initial_boundary_radius_pixels = 200;

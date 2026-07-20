@@ -496,6 +496,7 @@ void circloo_model_set_world(
 
 void circloo_model_set_lifecycle(
     std::int32_t initial_frame,
+    std::int32_t initial_timer_started,
     std::int32_t initial_checkpoint,
     std::int32_t initial_growth_alarm,
     std::int32_t initial_boundary_radius_pixels,
@@ -504,6 +505,7 @@ void circloo_model_set_lifecycle(
 ) {
     auto& lifecycle = LoadedModel().lifecycle;
     lifecycle.initial_frame = initial_frame;
+    lifecycle.initial_timer_started = initial_timer_started != 0;
     lifecycle.initial_checkpoint = initial_checkpoint;
     lifecycle.initial_growth_alarm = initial_growth_alarm;
     lifecycle.initial_boundary_radius_pixels = initial_boundary_radius_pixels;

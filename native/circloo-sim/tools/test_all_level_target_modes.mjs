@@ -7,12 +7,31 @@ const maxTrials = Math.max(2, Number(process.env.TRIALS || 2));
 const maxFrames = Math.max(360, Number(process.env.MAX_FRAMES || 360));
 const targets = ['cp', 'finish', 'point'];
 
-const base = [
+const standardBase = [
   { frame: -1, input: 'U' },
   { frame: 0, input: 'R' },
   { frame: 120, input: 'L' },
   { frame: 240, input: 'R' },
   { frame: 300, input: '.' }
+];
+const scenarios = [
+  { name: 'cp', target: 'cp', base: standardBase },
+  { name: 'finish', target: 'finish', base: standardBase },
+  { name: 'point', target: 'point', base: standardBase },
+  {
+    name: 'point-narrow-idle',
+    target: 'point',
+    base: [{ frame: 0, input: 'U' }],
+    settings: {
+      pointX: 1119.37,
+      pointY: 1654.94,
+      pointMinFrame: 165,
+      pointMaxFrame: 170,
+      maxFrames: 171,
+      minFrame: 150,
+      maxFrame: 170
+    }
+  }
 ];
 
 const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
@@ -50,10 +69,11 @@ function call(method, params = {}, timeout = 1_200_000) {
 await call('Runtime.enable');
 
 const expression = `(async () => {
-  const base = ${JSON.stringify(base)};
-  const targets = ${JSON.stringify(targets)};
+  const scenarios = ${JSON.stringify(scenarios)};
   const rows = [];
-  for (const target of targets) {
+  for (const scenario of scenarios) {
+    const target = scenario.target;
+    const base = scenario.base;
     const settings = {
       target,
       targetCP: 1,
@@ -70,12 +90,13 @@ const expression = `(async () => {
       removeMaxInputs: 1,
       alterMaxInputs: 1,
       alterTimeDifference: 8,
-      warmup: 0
+      warmup: 0,
+      ...(scenario.settings || {})
     };
     for (let level = ${firstLevel}; level <= ${lastLevel}; level += 1) {
       try {
         const result = await new Promise((resolve, reject) => {
-          const version = ['target-mode', target, level, Date.now(), Math.random()].join('-');
+          const version = ['target-mode', scenario.name, level, Date.now(), Math.random()].join('-');
           const worker = new Worker('/game/bruteforce-worker.js?sim=1&v=' + version);
           const timer = setTimeout(() => {
             worker.terminate();
@@ -118,6 +139,7 @@ const expression = `(async () => {
           !result.optimizerFallbackReason &&
           !result.wasmFallbackReason;
         rows.push({
+          scenario: scenario.name,
           target,
           level,
           ok,
@@ -129,6 +151,7 @@ const expression = `(async () => {
         });
       } catch (error) {
         rows.push({
+          scenario: scenario.name,
           target,
           level,
           ok: false,

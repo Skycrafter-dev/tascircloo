@@ -18,6 +18,7 @@ struct InstanceTag {
 
 struct RuntimeState {
     std::int32_t frame = 0;
+    bool timer_started = false;
     std::int32_t checkpoint = 0;
     std::int32_t growth_alarm = -1;
     std::int32_t boundary_radius_pixels = 0;
@@ -78,7 +79,7 @@ private:
     void DestroyBodyByInstanceId(std::int32_t instance_id);
     void DestroyJoint(const ModelJointKey& key);
     void AdvanceGrowthAlarm();
-    void CollectCurrentPosition();
+    void CollectCurrentPosition(std::int32_t collection_frame);
     void NudgeHorizontalVelocity(double amount);
     void ApplyInput(std::uint8_t input);
 };

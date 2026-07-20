@@ -18,7 +18,12 @@ npm run check
 npm run build
 ```
 
-The project uses `@sveltejs/adapter-cloudflare` so GitHub pushes can deploy through Cloudflare Pages.
+The project uses `@sveltejs/adapter-cloudflare` and deploys to the `tascircleoo2` Cloudflare Worker:
+
+```sh
+npm run build
+npx wrangler deploy
+```
 
 ## Script Format
 

@@ -486,6 +486,15 @@
 		return state.script.find((entry) => entry.input === 'U') || null;
 	}
 
+	function scriptPrestartPumps(script) {
+		const entry = (Array.isArray(script) ? script : []).find((item) => item && item.input === 'U');
+		return entry ? Math.abs(Math.floor(Number(entry.frame) || 0)) : 0;
+	}
+
+	function scriptExtraPrestartPumps(script) {
+		return Math.max(0, scriptPrestartPumps(script) - 1);
+	}
+
 	function beginUnfreeze(frames = 0, source = 'manual') {
 		if (state.unfreezeStarted) return;
 		state.unfreezeStarted = true;
@@ -4522,8 +4531,9 @@
 			);
 			const minCheckpoint = Math.max(0, Math.floor(Number(options.minCheckpoint) || 0));
 			const configuredMaxFrames = Math.max(1, Math.floor(Number(options.maxFrames) || 1));
-			const simulationLimit =
+			const frameSimulationLimit =
 				options.target === 'point' ? Math.max(configuredMaxFrames, pointMaxFrame + 1) : configuredMaxFrames;
+			const simulationLimit = frameSimulationLimit + scriptExtraPrestartPumps(script);
 			let score = Infinity;
 			let reached = false;
 			let frames = 0;
@@ -4634,7 +4644,10 @@
 			armReplay(normalized, { normalized: true });
 			resetFreeze(gmLevel());
 			let snapshotPumps = 0;
-			const maximumSnapshotPumps = Math.max(240, Math.max(0, targetFrame) * 2 + 240);
+			const maximumSnapshotPumps = Math.max(
+				240,
+				Math.max(0, targetFrame) * 2 + 240 + scriptPrestartPumps(normalized)
+			);
 			while (gameFrame() < targetFrame && snapshotPumps < maximumSnapshotPumps) {
 				W.__circlooTasPumpFrame();
 				snapshotPumps++;
@@ -4985,7 +4998,11 @@
 			}
 
 			let traceStartPumps = 0;
-			const maximumTraceStartPumps = Math.max(240, Math.max(0, startFrame) * 2 + 240);
+			const prestartPumps = scriptPrestartPumps(normalized);
+			const maximumTraceStartPumps = Math.max(
+				240,
+				Math.max(0, startFrame) * 2 + 240 + prestartPumps
+			);
 			while (gameFrame() < startFrame && traceStartPumps < maximumTraceStartPumps) {
 				W.__circlooTasPumpFrame();
 				traceStartPumps++;
@@ -5020,7 +5037,10 @@
 				physicsJointsCreationOrder().map((joint) => [joint, capturePhysicsJointDefinition(joint)])
 			);
 			let lastBoundaryRadius = null;
-			const maxSteps = Math.max(1, endFrame - startFrame + 2);
+			const maxSteps = Math.max(
+				1,
+				endFrame - startFrame + 2 + (startFrame === 0 ? prestartPumps : 0)
+			);
 			for (let step = 0; step < maxSteps && gameFrame() <= endFrame; step++) {
 				const player = gmPlayer();
 				const body = player && player._Xd1 && player._Xd1._932;

@@ -36,8 +36,8 @@ can be accepted.
 
 The target-mode matrix verifies `wasm-runtime` on all 20 levels for checkpoint,
 finish, standard point, and narrow-window idle point searches. It also includes
-Level 2 frame-zero-start and long-prestart point regressions: 82 combinations
-total.
+frame-zero and long-prestart regressions on Levels 2 and 9, including a 270-pump
+prestart before a single-frame Point target: 83 combinations total.
 
 ## Build and test
 

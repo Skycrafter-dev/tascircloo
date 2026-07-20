@@ -82,6 +82,31 @@ const scenarios = [
       minFrame: 0,
       maxFrame: 4
     }
+  },
+  {
+    name: 'point-level9-270-prestart',
+    target: 'point',
+    levels: [9],
+    base: [
+      { frame: -270, input: 'U' },
+      { frame: 0, input: 'R' },
+      { frame: 46, input: 'L' },
+      { frame: 96, input: '.' },
+      { frame: 98, input: 'L' }
+    ],
+    settings: {
+      pointX: 1099.72346,
+      pointY: 1481.94669,
+      pointMinFrame: 120,
+      pointMaxFrame: 120,
+      maxFrames: 121,
+      minFrame: 2,
+      maxFrame: 120,
+      addMaxInputs: 2,
+      removeMaxInputs: 1,
+      alterMaxInputs: 2,
+      alterTimeDifference: 3
+    }
   }
 ];
 

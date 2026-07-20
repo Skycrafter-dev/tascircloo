@@ -1151,7 +1151,7 @@
 			const timerStarted =
 				!!(model && model.lifecycle && model.lifecycle.initialTimerStarted) || snapshotFrame > 0;
 			if (timerStarted) {
-				return { frozen: false, prestartRemaining: 0, initialPrestartSteps: prestartSteps };
+				return { frozen: false, prestartRemaining: 0, initialPrestartSteps: 0 };
 			}
 			if (!unfreeze) {
 				return { frozen: true, prestartRemaining: 0, initialPrestartSteps: 0 };
@@ -1176,14 +1176,15 @@
 		function sequenceStepLimit(lastGameFrame, inputState) {
 			if (inputState && inputState.frozen) return 0;
 			const configuredLimit = Math.max(1, finiteFrame(options && options.maxFrames, 1));
-			const simulationLimit = pointTarget
+			const frameSimulationLimit = pointTarget
 				? Math.max(configuredLimit, pointMaxFrame + 1)
 				: configuredLimit;
 			const prestartSteps = Math.max(
 				0,
 				finiteFrame(inputState && inputState.initialPrestartSteps, 0)
 			);
-			const consumedSteps = snapshotFrame > 0 ? snapshotFrame + prestartSteps : 0;
+			const simulationLimit = frameSimulationLimit + (snapshotFrame === 0 ? prestartSteps : 0);
+			const consumedSteps = snapshotFrame;
 			const remainingBudget = Math.max(0, simulationLimit - consumedSteps);
 			const stepsToRequestedFrame =
 				Math.max(0, finiteFrame(lastGameFrame, snapshotFrame) - snapshotFrame) +

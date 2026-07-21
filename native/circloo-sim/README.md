@@ -38,7 +38,7 @@ The target-mode matrix verifies `wasm-runtime` on all 20 levels for checkpoint,
 finish, standard point, and narrow-window idle point searches. It also includes
 frame-zero and long-prestart regressions on Levels 2 and 9, a Level 3 Point
 regression where a hidden stale Max Frames value exceeds the scoring window, and
-a Level 8 divergent joint-spawn regression: 85 combinations total.
+Level 8 early- and late-window joint-spawn regressions: 86 combinations total.
 
 ## Build and test
 

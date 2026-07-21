@@ -658,7 +658,14 @@
 				unsupportedReasons.push(`joint-spawn-frame:${frame}`);
 				continue;
 			}
-			for (const source of event && Array.isArray(event.joints) ? event.joints : []) {
+			// The GameMaker/Box2D world list is newest-first, while CreateJoint also
+			// inserts each restored joint at the head. Recreate a batch in the
+			// original construction order so the resulting solver list matches the
+			// captured runtime on the first frame after the spawn.
+			const eventJoints = event && Array.isArray(event.joints)
+				? event.joints.slice().reverse()
+				: [];
+			for (const source of eventJoints) {
 				const joint = normalizeInstanceJoint(source);
 				if (joint.type !== 1 && joint.type !== 10) {
 					unsupportedReasons.push(`joint-type:${joint.type}`);

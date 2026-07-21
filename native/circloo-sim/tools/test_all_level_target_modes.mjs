@@ -5,6 +5,7 @@ const firstLevel = Math.max(1, Number(process.env.FIRST_LEVEL || 1));
 const lastLevel = Math.min(20, Number(process.env.LAST_LEVEL || 20));
 const maxTrials = Math.max(2, Number(process.env.TRIALS || 2));
 const maxFrames = Math.max(360, Number(process.env.MAX_FRAMES || 360));
+const scenarioFilter = String(process.env.SCENARIO || '').trim();
 const targets = ['cp', 'finish', 'point'];
 
 const standardBase = [
@@ -204,8 +205,52 @@ const scenarios = [
       alterMaxInputs: 5,
       alterTimeDifference: 11
     }
+  },
+  {
+    name: 'point-level8-late-joint-score-validation',
+    target: 'point',
+    levels: [8],
+    base: [
+      { frame: 0, input: 'U' },
+      { frame: 0, input: 'L' },
+      { frame: 13, input: 'R' },
+      { frame: 58, input: 'L' },
+      { frame: 114, input: 'R' },
+      { frame: 152, input: 'L' },
+      { frame: 159, input: 'R' },
+      { frame: 176, input: 'L' },
+      { frame: 253, input: 'LR' },
+      { frame: 257, input: 'R' },
+      { frame: 263, input: '.' },
+      { frame: 269, input: 'R' },
+      { frame: 276, input: '.' },
+      { frame: 277, input: 'R' },
+      { frame: 348, input: 'L' },
+      { frame: 445, input: '.' },
+      { frame: 446, input: 'R' }
+    ],
+    settings: {
+      pointX: 2191.06116,
+      pointY: 1776.16683,
+      pointMinFrame: 510,
+      pointMaxFrame: 550,
+      minCheckpoint: 3,
+      maxFrames: 3600,
+      minFrame: 400,
+      maxFrame: 500,
+      addMaxInputs: 3,
+      removeMaxInputs: 2,
+      alterMaxInputs: 10,
+      alterTimeDifference: 11
+    }
   }
 ];
+const selectedScenarios = scenarioFilter
+  ? scenarios.filter((scenario) => scenario.name === scenarioFilter)
+  : scenarios;
+if (scenarioFilter && !selectedScenarios.length) {
+  throw new Error(`unknown scenario: ${scenarioFilter}`);
+}
 
 const pages = await (await fetch(`http://127.0.0.1:${port}/json/list`)).json();
 const page = pages.find((item) => item.type === 'page');
@@ -242,7 +287,7 @@ function call(method, params = {}, timeout = 1_200_000) {
 await call('Runtime.enable');
 
 const expression = `(async () => {
-  const scenarios = ${JSON.stringify(scenarios)};
+  const scenarios = ${JSON.stringify(selectedScenarios)};
   const rows = [];
   for (const scenario of scenarios) {
     const target = scenario.target;

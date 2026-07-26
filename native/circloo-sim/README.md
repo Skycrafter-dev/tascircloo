@@ -15,6 +15,7 @@ The runtime model is not tied to a level number. It supports:
 - player input rules;
 - the GameMaker run timer, which starts on the first left/right input;
 - collectible checkpoints;
+- checkpoints collected by level objects, including moving and rotating bodies;
 - delayed boundary replacement and body-spawn patches.
 
 Bruteforce search is WASM-only. If a level model cannot be created or validated,
@@ -39,6 +40,10 @@ finish, standard point, and narrow-window idle point searches. It also includes
 frame-zero and long-prestart regressions on Levels 2 and 9, a Level 3 Point
 regression where a hidden stale Max Frames value exceeds the scoring window, and
 Level 8 early- and late-window joint-spawn regressions: 86 combinations total.
+
+The moving-object matrix performs frame-by-frame parity checks from frame 550
+through frame 929 on every level. A dedicated Level 13 regression also covers
+the moving-object checkpoint route used by late checkpoint-3 searches.
 
 ## Build and test
 
@@ -74,6 +79,12 @@ CDP_PORT=9440 \
 
 CDP_PORT=9440 \
   node native/circloo-sim/tools/test_all_level_target_modes.mjs
+
+CDP_PORT=9440 \
+  node native/circloo-sim/tools/test_all_level_moving_parity.mjs
+
+CDP_PORT=9440 \
+  node native/circloo-sim/tools/test_level13_moving_checkpoint_parity.mjs
 ```
 
 The benchmark uses the same UI and adaptive worker pool as production:

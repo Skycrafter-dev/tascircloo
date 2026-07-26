@@ -1092,7 +1092,7 @@
 					: null,
 			motorImpulse: finiteNumber(joint && joint._6P1),
 			limitState: finiteNumber(joint && (joint._9P1 ?? joint._cT1)),
-			collideConnected: !!joint._iF1,
+			collideConnected: !!joint._qD1,
 			raw: primitiveFields(joint, 56)
 		};
 	}
@@ -4414,7 +4414,7 @@
 				},
 			motorImpulse: Number(joint && joint._6P1) || 0,
 			limitState: Number(joint && (joint._9P1 ?? joint._cT1)) || 0,
-			collideConnected: !!(joint && joint._iF1),
+			collideConnected: !!(joint && joint._qD1),
 			enableLimit: !!(joint && joint._7P1),
 			enableMotor: !!(joint && joint._8P1)
 		};

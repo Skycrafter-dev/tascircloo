@@ -31,6 +31,52 @@ std::vector<b2Vec2> BoxVertices(const std::vector<ModelVec2>& source) {
     return result;
 }
 
+bool IsSpecialCollectorObject(std::int32_t object_index) {
+    switch (object_index) {
+        case 26: // obj_physicsinstance_mc
+        case 27: // obj_physicsinstance_mc_timed
+        case 31: // obj_physicsinstance_triangle_mc
+        case 33: // obj_physicsinstance_block_mc
+        case 42: // obj_physicsinstance_moveable
+        case 43: // obj_block_rotate
+            return true;
+        default:
+            return false;
+    }
+}
+
+b2Vec2 BoundaryCenter(const RuntimeModel& model) {
+    for (const ModelBody& body : model.bodies) {
+        if (body.object_index != 1) continue;
+
+        bool found = false;
+        b2Vec2 lower(0.0, 0.0);
+        b2Vec2 upper(0.0, 0.0);
+        const double cosine = std::cos(body.angle);
+        const double sine = std::sin(body.angle);
+        for (const ModelFixture& fixture : body.fixtures) {
+            for (const ModelVec2& vertex : fixture.shape.vertices) {
+                const b2Vec2 world_vertex(
+                    body.position.x + cosine * vertex.x - sine * vertex.y,
+                    body.position.y + sine * vertex.x + cosine * vertex.y
+                );
+                if (!found) {
+                    lower = world_vertex;
+                    upper = world_vertex;
+                    found = true;
+                } else {
+                    lower.x = std::min(lower.x, world_vertex.x);
+                    lower.y = std::min(lower.y, world_vertex.y);
+                    upper.x = std::max(upper.x, world_vertex.x);
+                    upper.y = std::max(upper.y, world_vertex.y);
+                }
+            }
+        }
+        if (found) return 0.5 * (lower + upper);
+    }
+    return b2Vec2(0.0, 0.0);
+}
+
 [[noreturn]] void InvalidModel() {
     __builtin_trap();
 }
@@ -494,6 +540,7 @@ void RuntimeSimulator::ApplyGrowthPatch(const ModelWorldPatch& patch) {
         pending_growth_bodies_.push_back(&body);
     }
     state_.boundary_radius_pixels = patch.boundary_radius_pixels;
+    state_.boundary_settled_frames = 0;
 }
 
 void RuntimeSimulator::ApplyCheckpointPatches() {
@@ -663,7 +710,7 @@ void RuntimeSimulator::CollectCurrentPosition(std::int32_t collection_frame) {
             continue;
         }
         const ModelCollectible& collectible = model_.collectibles[index];
-        if (!collectible.active || collectible.excluded || !collectible.player_triggered) {
+        if (!collectible.active || collectible.excluded) {
             continue;
         }
 
@@ -678,12 +725,24 @@ void RuntimeSimulator::CollectCurrentPosition(std::int32_t collection_frame) {
             }
         }
 
-        const double dx = collectible_x - player_x_pixels;
-        const double dy = collectible_y - player_y_pixels;
-        const double distance_limit =
-            collectible.radius_pixels + model_.player.collection_radius_pixels;
-        const double distance = std::sqrt((dx * dx) + (dy * dy));
-        if (!(distance < distance_limit)) {
+        bool collected = false;
+        if (collectible.player_triggered) {
+            const double dx = collectible_x - player_x_pixels;
+            const double dy = collectible_y - player_y_pixels;
+            const double distance_limit =
+                collectible.radius_pixels + model_.player.collection_radius_pixels;
+            const double distance = std::sqrt((dx * dx) + (dy * dy));
+            collected = distance < distance_limit;
+        } else if (collectible.object_index == 23 && state_.boundary_settled_frames >= 2) {
+            const b2Vec2 center = BoundaryCenter(model_);
+            const double dx = collectible_x - center.x * inverse_scale;
+            const double dy = collectible_y - center.y * inverse_scale;
+            const double distance = std::sqrt((dx * dx) + (dy * dy));
+            collected =
+                distance < state_.boundary_radius_pixels &&
+                CollectorOverlaps(collectible);
+        }
+        if (!collected) {
             continue;
         }
 
@@ -704,7 +763,66 @@ void RuntimeSimulator::CollectCurrentPosition(std::int32_t collection_frame) {
         ) {
             state_.growth_alarm = model_.lifecycle.growth_delay_frames;
         }
+        DestroyBodyByInstanceId(collectible.instance_id);
     }
+}
+
+bool RuntimeSimulator::CollectorOverlaps(const ModelCollectible& collectible) const {
+    b2Body* collectible_body = nullptr;
+    if (collectible.body_index >= 0) {
+        const std::size_t body_index = static_cast<std::size_t>(collectible.body_index);
+        if (body_index < initial_bodies_.size()) {
+            collectible_body = initial_bodies_[body_index];
+        }
+    }
+    if (!collectible_body) {
+        collectible_body = const_cast<RuntimeSimulator*>(this)->FindBodyByInstanceId(
+            collectible.instance_id
+        );
+    }
+    if (!collectible_body || !collectible_body->IsActive()) return false;
+
+    for (b2Body* collector : bodies_) {
+        const auto* tag = collector
+            ? static_cast<const InstanceTag*>(collector->GetUserData())
+            : nullptr;
+        if (!collector || !tag || !collector->IsActive() ||
+            !IsSpecialCollectorObject(tag->object_index)) {
+            continue;
+        }
+
+        for (b2Fixture* collectible_fixture = collectible_body->GetFixtureList();
+             collectible_fixture;
+             collectible_fixture = collectible_fixture->GetNext()) {
+            const b2Shape* collectible_shape = collectible_fixture->GetShape();
+            if (!collectible_shape) continue;
+            for (b2Fixture* collector_fixture = collector->GetFixtureList();
+                 collector_fixture;
+                 collector_fixture = collector_fixture->GetNext()) {
+                const b2Shape* collector_shape = collector_fixture->GetShape();
+                if (!collector_shape) continue;
+                for (std::int32_t collectible_child = 0;
+                     collectible_child < collectible_shape->GetChildCount();
+                     ++collectible_child) {
+                    for (std::int32_t collector_child = 0;
+                         collector_child < collector_shape->GetChildCount();
+                         ++collector_child) {
+                        if (b2TestOverlap(
+                                collectible_shape,
+                                collectible_child,
+                                collector_shape,
+                                collector_child,
+                                collectible_body->GetTransform(),
+                                collector->GetTransform()
+                            )) {
+                            return true;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    return false;
 }
 
 void RuntimeSimulator::NudgeHorizontalVelocity(double amount) {
@@ -743,6 +861,9 @@ void RuntimeSimulator::Step(std::uint8_t input) {
     const bool timer_started = state_.timer_started || (input & 3U) != 0U;
     const std::int32_t next_frame = state_.frame + (timer_started ? 1 : 0);
     AdvanceGrowthAlarm();
+    if (state_.boundary_settled_frames < 2) {
+        ++state_.boundary_settled_frames;
+    }
     CollectCurrentPosition(next_frame);
     ApplyInput(input);
     state_.timer_started = timer_started;

@@ -22,6 +22,7 @@ struct RuntimeState {
     std::int32_t checkpoint = 0;
     std::int32_t growth_alarm = -1;
     std::int32_t boundary_radius_pixels = 0;
+    std::int32_t boundary_settled_frames = 2;
     std::array<std::int32_t, 32> checkpoint_frames{};
     std::vector<std::uint8_t> collected{};
 };
@@ -83,6 +84,7 @@ private:
     void DestroyJoint(const ModelJointKey& key);
     void AdvanceGrowthAlarm();
     void CollectCurrentPosition(std::int32_t collection_frame);
+    [[nodiscard]] bool CollectorOverlaps(const ModelCollectible& collectible) const;
     void NudgeHorizontalVelocity(double amount);
     void ApplyInput(std::uint8_t input);
 };

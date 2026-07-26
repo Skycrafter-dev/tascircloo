@@ -14,6 +14,7 @@
 		"check:conditions": "node scripts/verify-bruteforce-conditions.mjs",
 		"check:mutations": "node scripts/verify-mutation-controls.mjs",
 		"check:wasm-targets": "node native/circloo-sim/tools/test_all_level_target_modes.mjs",
+		"check:wasm-moving": "node native/circloo-sim/tools/test_all_level_moving_parity.mjs && node native/circloo-sim/tools/test_level13_moving_checkpoint_parity.mjs",
 		"check:watch": "svelte-kit sync && svelte-check --tsconfig ./tsconfig.json --watch"
 	},
 	"devDependencies": {

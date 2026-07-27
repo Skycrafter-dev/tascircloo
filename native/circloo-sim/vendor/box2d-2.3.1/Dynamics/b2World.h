@@ -163,6 +163,13 @@ public:
 	/// Build and update the contact graph without advancing simulation time.
 	void InitializeSnapshotContacts();
 
+	/// Restore an exact captured fat AABB for one fixture child proxy.
+	bool SetFixtureProxyFatAABB(
+		b2Fixture* fixture,
+		int32 childIndex,
+		const b2AABB& aabb
+	);
+
 	/// Get the number of broad-phase proxies.
 	int32 GetProxyCount() const;
 

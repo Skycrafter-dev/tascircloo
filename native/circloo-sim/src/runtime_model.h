@@ -37,6 +37,12 @@ struct ModelShape {
     bool loop = false;
 };
 
+struct ModelAabb {
+    ModelVec2 lower{};
+    ModelVec2 upper{};
+    bool valid = false;
+};
+
 struct ModelFixture {
     ModelShape shape{};
     double density = 0.0;
@@ -44,6 +50,7 @@ struct ModelFixture {
     double restitution = 0.0;
     bool sensor = false;
     ModelFilter filter{};
+    std::vector<ModelAabb> proxy_aabbs{};
 };
 
 struct ModelBody {

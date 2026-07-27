@@ -438,13 +438,15 @@ b2Fixture* RuntimeSimulator::CreateFixture(b2Body& body, const ModelFixture& sou
     definition.isSensor = source.sensor;
     SetFilter(definition, source.filter);
 
+    b2Fixture* fixture = nullptr;
     switch (source.shape.type) {
         case ModelShapeType::Circle: {
             b2CircleShape shape;
             shape.m_radius = source.shape.radius;
             shape.m_p.Set(source.shape.center.x, source.shape.center.y);
             definition.shape = &shape;
-            return body.CreateFixture(&definition);
+            fixture = body.CreateFixture(&definition);
+            break;
         }
         case ModelShapeType::Polygon: {
             if (source.shape.vertices.size() < 3U) {
@@ -455,7 +457,8 @@ b2Fixture* RuntimeSimulator::CreateFixture(b2Body& body, const ModelFixture& sou
             shape.Set(vertices.data(), static_cast<std::int32_t>(vertices.size()));
             shape.m_radius = source.shape.radius;
             definition.shape = &shape;
-            return body.CreateFixture(&definition);
+            fixture = body.CreateFixture(&definition);
+            break;
         }
         case ModelShapeType::Edge: {
             if (source.shape.vertices.size() < 2U) {
@@ -482,7 +485,8 @@ b2Fixture* RuntimeSimulator::CreateFixture(b2Body& body, const ModelFixture& sou
                 shape.m_hasVertex3 = true;
             }
             definition.shape = &shape;
-            return body.CreateFixture(&definition);
+            fixture = body.CreateFixture(&definition);
+            break;
         }
         case ModelShapeType::Chain: {
             const std::size_t minimum = source.shape.loop ? 3U : 2U;
@@ -510,10 +514,29 @@ b2Fixture* RuntimeSimulator::CreateFixture(b2Body& body, const ModelFixture& sou
             }
             shape.m_radius = source.shape.radius;
             definition.shape = &shape;
-            return body.CreateFixture(&definition);
+            fixture = body.CreateFixture(&definition);
+            break;
         }
     }
-    InvalidModel();
+    if (!fixture) {
+        InvalidModel();
+    }
+
+    for (std::size_t child = 0; child < source.proxy_aabbs.size(); ++child) {
+        const ModelAabb& captured = source.proxy_aabbs[child];
+        if (!captured.valid) continue;
+        b2AABB aabb;
+        aabb.lowerBound.Set(captured.lower.x, captured.lower.y);
+        aabb.upperBound.Set(captured.upper.x, captured.upper.y);
+        if (!world_.SetFixtureProxyFatAABB(
+                fixture,
+                static_cast<std::int32_t>(child),
+                aabb
+            )) {
+            InvalidModel();
+        }
+    }
+    return fixture;
 }
 
 void RuntimeSimulator::ReplaceFixtures(

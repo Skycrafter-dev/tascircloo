@@ -68,6 +68,40 @@ const scenarios = [
   { name: 'finish', target: 'finish', base: standardBase },
   { name: 'point', target: 'point', base: standardBase },
   {
+    name: 'cp-level5-snapshot-proxy-wakeup',
+    target: 'cp',
+    levels: [5],
+    base: [
+      { frame: 0, input: 'U' },
+      { frame: 0, input: 'L' },
+      { frame: 14, input: 'R' },
+      { frame: 44, input: 'L' },
+      { frame: 79, input: 'R' },
+      { frame: 115, input: '.' },
+      { frame: 117, input: 'L' },
+      { frame: 138, input: '.' },
+      { frame: 139, input: 'R' },
+      { frame: 252, input: 'L' },
+      { frame: 256, input: 'LR' },
+      { frame: 257, input: 'L' },
+      { frame: 350, input: 'R' },
+      { frame: 399, input: 'L' },
+      { frame: 473, input: 'R' }
+    ],
+    settings: {
+      targetCP: 4,
+      finishCP: 4,
+      minCheckpoint: 3,
+      maxFrames: 930,
+      minFrame: 500,
+      maxFrame: 600,
+      addMaxInputs: 4,
+      removeMaxInputs: 2,
+      alterMaxInputs: 6,
+      alterTimeDifference: 11
+    }
+  },
+  {
     name: 'point-narrow-idle',
     target: 'point',
     base: [{ frame: 0, input: 'U' }],

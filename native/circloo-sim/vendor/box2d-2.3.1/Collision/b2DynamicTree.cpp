@@ -127,6 +127,17 @@ void b2DynamicTree::DestroyProxy(int32 proxyId)
 	FreeNode(proxyId);
 }
 
+void b2DynamicTree::SetFatAABB(int32 proxyId, const b2AABB& aabb)
+{
+	b2Assert(0 <= proxyId && proxyId < m_nodeCapacity);
+	b2Assert(m_nodes[proxyId].IsLeaf());
+	b2Assert(aabb.IsValid());
+
+	RemoveLeaf(proxyId);
+	m_nodes[proxyId].aabb = aabb;
+	InsertLeaf(proxyId);
+}
+
 bool b2DynamicTree::MoveProxy(int32 proxyId, const b2AABB& aabb, const b2Vec2& displacement)
 {
 	b2Assert(0 <= proxyId && proxyId < m_nodeCapacity);

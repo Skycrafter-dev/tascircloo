@@ -83,6 +83,9 @@ public:
 	/// @return the proxy user data or 0 if the id is invalid.
 	void* GetUserData(int32 proxyId) const;
 
+	/// Restore an exact captured fat AABB without buffering a proxy move.
+	void SetFatAABB(int32 proxyId, const b2AABB& aabb);
+
 	/// Get the fat AABB for a proxy.
 	const b2AABB& GetFatAABB(int32 proxyId) const;
 

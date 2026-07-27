@@ -897,6 +897,29 @@ void b2World::SolveTOI(const b2TimeStep& step)
 	}
 }
 
+bool b2World::SetFixtureProxyFatAABB(
+	b2Fixture* fixture,
+	int32 childIndex,
+	const b2AABB& aabb
+)
+{
+	if (fixture == NULL || fixture->m_body == NULL ||
+		fixture->m_body->m_world != this ||
+		childIndex < 0 || childIndex >= fixture->m_proxyCount ||
+		fixture->m_proxies == NULL || !aabb.IsValid())
+	{
+		return false;
+	}
+
+	const int32 proxyId = fixture->m_proxies[childIndex].proxyId;
+	if (proxyId == b2BroadPhase::e_nullProxy)
+	{
+		return false;
+	}
+	m_contactManager.m_broadPhase.SetFatAABB(proxyId, aabb);
+	return true;
+}
+
 void b2World::InitializeSnapshotContacts()
 {
 	m_contactManager.FindNewContacts();

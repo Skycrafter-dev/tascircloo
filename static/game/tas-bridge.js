@@ -4454,6 +4454,8 @@
 
 	function capturePhysicsBody(body) {
 		const fixtures = [];
+		const world = body && typeof body._mD1 === 'function' ? body._mD1() : null;
+		const broadPhase = world && world._eC1 && world._eC1._fC1;
 		for (
 			let fixture = body && typeof body._hD1 === 'function' ? body._hD1() : null;
 			fixture;
@@ -4463,8 +4465,20 @@
 				? fixture._ED1()
 				: fixture._zD1 || fixture._7D1 || fixture._3D1 || null;
 			const filter = typeof fixture._JD1 === 'function' ? fixture._JD1() : fixture._AD1;
+			const proxyAabbs = [];
+			for (let childIndex = 0; childIndex < Math.max(0, Number(fixture._Xt1) || 0); childIndex += 1) {
+				const proxy = fixture._6D1 && fixture._6D1[childIndex];
+				const fat = proxy && broadPhase && typeof broadPhase._au1 === 'function'
+					? broadPhase._au1(proxy._3u1)
+					: null;
+				proxyAabbs.push(fat ? {
+					lower: vec(fat._ys1),
+					upper: vec(fat._zs1)
+				} : null);
+			}
 			fixtures.push({
 				shape: capturePhysicsShape(shape),
+				proxyAabbs,
 				density: typeof fixture._MD1 === 'function' ? Number(fixture._MD1()) : Number(fixture._iC1),
 				friction: typeof fixture._ND1 === 'function' ? Number(fixture._ND1()) : Number(fixture._CD1),
 				restitution: typeof fixture._OD1 === 'function' ? Number(fixture._OD1()) : Number(fixture._DD1),
@@ -4708,6 +4722,7 @@
 
 			const wrapper = physicsWrapper();
 			const world = physicsWorld();
+			const broadPhase = world && world._eC1 && world._eC1._fC1;
 			const bodies = [];
 			const bodyIds = new Map();
 			const fixtureIds = new Map();
@@ -4731,8 +4746,17 @@
 						typeof fixture._ED1 === 'function'
 							? fixture._ED1()
 							: fixture._zD1 || fixture._7D1 || fixture._3D1 || null;
+					const proxyAabbs = [];
+					for (let childIndex = 0; childIndex < Math.max(0, Number(fixture._Xt1) || 0); childIndex += 1) {
+						const proxy = fixture._6D1 && fixture._6D1[childIndex];
+						const fat = proxy && broadPhase && typeof broadPhase._au1 === 'function'
+							? broadPhase._au1(proxy._3u1)
+							: null;
+						proxyAabbs.push(fat ? { lower: vec(fat._ys1), upper: vec(fat._zs1) } : null);
+					}
 					fixtures.push({
 						fixtureClass: fixture.constructor && fixture.constructor.name,
+						proxyAabbs,
 						shapeClass: shape && shape.constructor && shape.constructor.name,
 						shape: exactShape(shape),
 						density: typeof fixture._MD1 === 'function' ? Number(fixture._MD1()) : Number(fixture._iC1),

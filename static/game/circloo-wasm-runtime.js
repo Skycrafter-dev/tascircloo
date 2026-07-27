@@ -105,6 +105,12 @@
 			friction: finite(source && source.friction, 0.2),
 			restitution: finite(source && source.restitution),
 			sensor: !!(source && source.sensor),
+			proxyAabbs: Array.isArray(source && source.proxyAabbs)
+				? source.proxyAabbs.map((aabb) => aabb && aabb.lower && aabb.upper ? {
+					lower: { x: finite(aabb.lower.x), y: finite(aabb.lower.y) },
+					upper: { x: finite(aabb.upper.x), y: finite(aabb.upper.y) }
+				} : null)
+				: [],
 			filter: {
 				categoryBits: integer(filter.categoryBits, 1),
 				maskBits: integer(filter.maskBits, 0xffff),
@@ -788,6 +794,7 @@
 			addPolygon: requireExport(exports, 'circloo_model_add_polygon_fixture'),
 			addEdge: requireExport(exports, 'circloo_model_add_edge_fixture'),
 			addChain: requireExport(exports, 'circloo_model_add_chain_fixture'),
+			setFixtureProxyAabb: requireExport(exports, 'circloo_model_set_last_fixture_proxy_aabb'),
 			addCollectible: requireExport(exports, 'circloo_model_add_collectible'),
 			finalize: requireExport(exports, 'circloo_model_finalize'),
 			simulate: requireExport(exports, 'circloo_simulate'),
@@ -884,6 +891,19 @@
 				throw new Error(`Unsupported shape type ${type}`);
 			}
 			if (accepted !== 1) throw new Error(`Wasm rejected shape type ${type}`);
+			for (let childIndex = 0; childIndex < (fixture.proxyAabbs || []).length; childIndex += 1) {
+				const aabb = fixture.proxyAabbs[childIndex];
+				if (!aabb || !aabb.lower || !aabb.upper) continue;
+				if (abi.setFixtureProxyAabb(
+					targetType,
+					targetIndex,
+					childIndex,
+					finite(aabb.lower.x),
+					finite(aabb.lower.y),
+					finite(aabb.upper.x),
+					finite(aabb.upper.y)
+				) !== 1) throw new Error('Wasm rejected fixture proxy AABB');
+			}
 		}
 
 		function addBody(body, patchIndex = -1) {

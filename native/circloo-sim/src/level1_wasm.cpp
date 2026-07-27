@@ -1160,6 +1160,31 @@ std::int32_t circloo_model_add_chain_fixture(
     return 1;
 }
 
+std::int32_t circloo_model_set_last_fixture_proxy_aabb(
+    std::int32_t target_type,
+    std::int32_t target_index,
+    std::uint32_t child_index,
+    double lower_x,
+    double lower_y,
+    double upper_x,
+    double upper_y
+) {
+    auto* fixtures = ResolveFixtureTarget(target_type, target_index);
+    if (!fixtures || fixtures->empty() ||
+        lower_x > upper_x || lower_y > upper_y) {
+        return 0;
+    }
+    circloo::ModelFixture& fixture = fixtures->back();
+    if (fixture.proxy_aabbs.size() <= child_index) {
+        fixture.proxy_aabbs.resize(static_cast<std::size_t>(child_index) + 1U);
+    }
+    circloo::ModelAabb& aabb = fixture.proxy_aabbs[child_index];
+    aabb.lower = circloo::ModelVec2{lower_x, lower_y};
+    aabb.upper = circloo::ModelVec2{upper_x, upper_y};
+    aabb.valid = true;
+    return 1;
+}
+
 std::int32_t circloo_model_add_collectible(
     std::int32_t instance_id,
     std::int32_t object_index,

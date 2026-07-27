@@ -603,7 +603,9 @@
 				continue;
 			}
 
-			const frame = integer(event && event.frame, -2) + (event && event.exactFrame ? 0 : 1);
+			// Spawn is observed in the exact snapshot for event.frame. Restore it after
+			// that frame's physics step so it is present in the same end-of-frame state.
+			const frame = integer(event && event.frame, -1);
 			if (frame >= integer(inspection.frame)) {
 				framePatchFor(frame).spawnedBodies.push(...spawnedBodies);
 				continue;
@@ -615,7 +617,10 @@
 			? options.bodyDestroyEvents.slice().sort((left, right) => integer(left && left.frame) - integer(right && right.frame))
 			: [];
 		for (const event of bodyDestroyEvents) {
-			const frame = integer(event && event.frame, -2) + 1;
+			// Destruction is observed in the exact snapshot for event.frame. Apply it
+			// after that frame's physics step so the rebuilt world matches the same
+			// end-of-frame body list.
+			const frame = integer(event && event.frame, -1);
 			if (frame < integer(inspection.frame)) {
 				unsupportedReasons.push(`destroy-frame:${frame}`);
 				continue;

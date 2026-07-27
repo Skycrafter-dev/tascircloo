@@ -102,6 +102,40 @@ const scenarios = [
     }
   },
   {
+    name: 'cp-level15-body-destroy-timing',
+    target: 'cp',
+    levels: [15],
+    base: [
+      { frame: 0, input: 'U' },
+      { frame: 0, input: 'L' },
+      { frame: 14, input: 'R' },
+      { frame: 44, input: 'L' },
+      { frame: 79, input: 'R' },
+      { frame: 115, input: '.' },
+      { frame: 117, input: 'L' },
+      { frame: 138, input: '.' },
+      { frame: 139, input: 'R' },
+      { frame: 252, input: 'L' },
+      { frame: 256, input: 'LR' },
+      { frame: 257, input: 'L' },
+      { frame: 350, input: 'R' },
+      { frame: 399, input: 'L' },
+      { frame: 473, input: 'R' }
+    ],
+    settings: {
+      targetCP: 4,
+      finishCP: 4,
+      minCheckpoint: 3,
+      maxFrames: 602,
+      minFrame: 380,
+      maxFrame: 550,
+      addMaxInputs: 4,
+      removeMaxInputs: 2,
+      alterMaxInputs: 8,
+      alterTimeDifference: 11
+    }
+  },
+  {
     name: 'point-narrow-idle',
     target: 'point',
     base: [{ frame: 0, input: 'U' }],

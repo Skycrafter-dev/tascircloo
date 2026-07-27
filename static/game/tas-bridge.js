@@ -5418,6 +5418,27 @@
 				};
 			})
 			: [];
+		const bodyDestroyEvents = trace && Array.isArray(trace.bodyDestroyEvents)
+			? trace.bodyDestroyEvents.map((event) => {
+				const instanceIds = new Set(
+					(event.instanceIds || []).map((instanceId) => Number(instanceId))
+				);
+				const observedFrame = Number(event && event.frame);
+				const referenceFrame = referenceFrames.find((frame) => {
+					if (Number(frame && frame.frame) < observedFrame - 1) return false;
+					const visible = new Set(
+						(frame.physicsBodies || []).map((body) => Number(body && body.instanceId))
+					);
+					return Array.from(instanceIds).every((instanceId) => !visible.has(instanceId));
+				});
+				if (!referenceFrame) return event;
+				return {
+					...event,
+					frame: Number(referenceFrame.frame),
+					exactFrame: true
+				};
+			})
+			: [];
 		const jointSpawnEvents = trace && Array.isArray(trace.jointSpawnEvents)
 			? trace.jointSpawnEvents.map((event) => {
 				const keys = new Set((event.joints || []).map(physicsJointDefinitionKey));
@@ -5455,7 +5476,7 @@
 			inspection,
 			boundaryStates: trace && Array.isArray(trace.boundaryStates) ? trace.boundaryStates : [],
 			bodySpawnEvents,
-			bodyDestroyEvents: trace && Array.isArray(trace.bodyDestroyEvents) ? trace.bodyDestroyEvents : [],
+			bodyDestroyEvents,
 			bodyUpdateEvents: configurationTrace && Array.isArray(configurationTrace.bodyUpdateEvents)
 				? configurationTrace.bodyUpdateEvents
 				: [],

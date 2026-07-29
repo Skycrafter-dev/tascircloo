@@ -519,6 +519,16 @@
 
 		const initialRadius = integer(big.radius, 200);
 		const initialCheckpoint = integer(inspection.cp);
+		const eventCheckpointFrames = Array.isArray(options.checkpointFrames)
+			? options.checkpointFrames.map((value) =>
+				value == null || !Number.isFinite(Number(value)) ? null : integer(value)
+			)
+			: [];
+		const growthTransitionFrames = new Map(
+			boundaryStates
+				.map((state) => [integer(state && state.radius, -1), integer(state && state.frame, -1)])
+				.filter(([radius, frame]) => radius > initialRadius && frame >= integer(inspection.frame))
+		);
 		const knownBodyIds = new Set(bodies.map((body) => body.instanceId));
 		const framePatchFor = (frame) => {
 			let patch = model.framePatches.find((candidate) => integer(candidate.frame) === frame);
@@ -564,9 +574,10 @@
 				framePatchFor(contactFrame).contacts.push(contact);
 			}
 
+			const frame = integer(event && event.frame, -1);
 			const radius = integer(event && event.boundaryRadius, initialRadius);
-			const growthAlarm = integer(event && event.growthAlarm, -1);
-			if (growthAlarm === 0 && radius > initialRadius) {
+			const growthFrame = growthTransitionFrames.get(radius);
+			if (radius > initialRadius && growthFrame === frame) {
 				const growthPatch = model.growthPatches.find(
 					(patch) => integer(patch.boundaryRadiusPixels) === radius
 				);
@@ -579,7 +590,8 @@
 			}
 
 			const checkpoint = integer(event && event.checkpoint, initialCheckpoint);
-			if (checkpoint > initialCheckpoint) {
+			const checkpointFrame = eventCheckpointFrames[checkpoint];
+			if (checkpoint > initialCheckpoint && checkpointFrame === frame) {
 				let checkpointPatch = model.checkpointPatches.find(
 					(patch) => integer(patch.checkpoint) === checkpoint
 				);
@@ -591,21 +603,11 @@
 				continue;
 			}
 
-			if (radius > initialRadius) {
-				const growthPatch = model.growthPatches.find(
-					(patch) => integer(patch.boundaryRadiusPixels) === radius
-				);
-				if (!growthPatch) {
-					unsupportedReasons.push(`spawn-growth-radius:${radius}`);
-					continue;
-				}
-				growthPatch.spawnedBodies.push(...spawnedBodies);
-				continue;
-			}
-
+			// A body that appears while a checkpoint or expanded boundary remains active
+			// is not necessarily caused by that lifecycle event. Keep delayed level-timer
+			// spawns tied to their captured game frame instead of replaying them early.
 			// Spawn is observed in the exact snapshot for event.frame. Restore it after
 			// that frame's physics step so it is present in the same end-of-frame state.
-			const frame = integer(event && event.frame, -1);
 			if (frame >= integer(inspection.frame)) {
 				framePatchFor(frame).spawnedBodies.push(...spawnedBodies);
 				continue;

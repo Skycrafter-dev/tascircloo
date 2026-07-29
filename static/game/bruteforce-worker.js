@@ -986,6 +986,7 @@
 		const prestartConsumed = snapshotFrame === 0 && !!capture.prestartConsumed;
 		const model = W.CirclooWasmRuntime.modelFromInspection(capture.inspection, {
 			boundaryStates: capture.boundaryStates,
+			checkpointFrames: capture.times,
 			bodySpawnEvents: capture.bodySpawnEvents,
 			bodyDestroyEvents: capture.bodyDestroyEvents,
 			bodyUpdateEvents: capture.bodyUpdateEvents,

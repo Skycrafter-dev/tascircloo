@@ -126,6 +126,37 @@ const scenarios = [
     }
   },
   {
+    name: 'cp-level12-negative-prestart-delayed-spawns',
+    target: 'cp',
+    levels: [12],
+    base: [
+      { frame: -65, input: 'U' },
+      { frame: 0, input: 'L' },
+      { frame: 20, input: 'R' },
+      { frame: 71, input: 'L' },
+      { frame: 102, input: 'R' },
+      { frame: 111, input: 'L' },
+      { frame: 113, input: 'R' },
+      { frame: 132, input: 'L' },
+      { frame: 189, input: 'R' },
+      { frame: 197, input: 'L' },
+      { frame: 211, input: 'R' },
+      { frame: 237, input: 'L' },
+      { frame: 250, input: '.' }
+    ],
+    settings: {
+      targetCP: 3,
+      minCheckpoint: 2,
+      maxFrames: 315,
+      minFrame: 0,
+      maxFrame: 315,
+      addMaxInputs: 4,
+      removeMaxInputs: 2,
+      alterMaxInputs: 8,
+      alterTimeDifference: 11
+    }
+  },
+  {
     name: 'cp-level15-body-destroy-timing',
     target: 'cp',
     levels: [15],

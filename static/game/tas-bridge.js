@@ -17,6 +17,9 @@
 	const FINAL_TILE_BASE = 30000000;
 	const RETRY_INSTANCE_STRIDE = 100000;
 	const RETRY_TILE_STRIDE = 1000000;
+	const CANONICAL_ALLOCATOR_SLOTS = 8;
+	const CANONICAL_INSTANCE_SLOT_STRIDE = 100000;
+	const CANONICAL_TILE_SLOT_STRIDE = 1000000;
 	const RealDate = W.Date;
 	const realPerformanceNow =
 		W.performance && typeof W.performance.now === 'function' ? W.performance.now.bind(W.performance) : null;
@@ -220,6 +223,7 @@
 			const timestamp = state.clockInstalled ? advanceDeterministicClock() : fallbackTimestamp;
 			for (const [, callback] of queued) callback(timestamp);
 		};
+		W.__circlooTasPumpCanonicalFrame = runFrameStep;
 
 		const hostTick = (hostTimestamp) => {
 			const now = Number.isFinite(hostTimestamp) ? hostTimestamp : REAL.now();
@@ -2083,6 +2087,27 @@
 		return true;
 	}
 
+	function canonicalStageAllocator(run, instances, tiles) {
+		const slot = Math.max(0, Math.floor(Number(run && run.allocatorSlot) || 0)) % CANONICAL_ALLOCATOR_SLOTS;
+		return {
+			instances: instances + slot * CANONICAL_INSTANCE_SLOT_STRIDE,
+			tiles: tiles + slot * CANONICAL_TILE_SLOT_STRIDE
+		};
+	}
+
+	function pumpCanonicalPreparationFrame(run) {
+		resetFreeze(run.level);
+		state.physicsFrozen = false;
+		state.unfreezeStarted = true;
+		state.prestartRemaining = 0;
+		state.prestartElapsed = 0;
+		state.unfreezeSource = 'canonical-prep';
+		state.rafAccumulator = 0;
+		if (typeof W.__circlooTasPumpCanonicalFrame !== 'function') return false;
+		W.__circlooTasPumpCanonicalFrame();
+		return true;
+	}
+
 	function canonicalGameplayEnvironmentReady() {
 		return simRoomId() === 5 && simHasPhysicsWorld() && typeof W._c4 === 'function';
 	}
@@ -2162,16 +2187,15 @@
 		resetDeterministicClock();
 		try {
 			const previousPlayer = gmPlayer();
-			if (
-				!startLevelDirect(state.activeRun.level, {
-					instances: WARMUP_INSTANCE_BASE,
-					tiles: WARMUP_TILE_BASE
-				})
-			) {
+			if (!startLevelDirect(
+				state.activeRun.level,
+				canonicalStageAllocator(state.activeRun, WARMUP_INSTANCE_BASE, WARMUP_TILE_BASE)
+			)) {
 				if (!canonicalGameplayEnvironmentReady()) deferCanonicalRunUntilGameplay(state.activeRun);
 				else failCanonicalRun('Unable to initialize the deterministic gameplay state');
 				return;
 			}
+			pumpCanonicalPreparationFrame(state.activeRun);
 			waitForCanonicalPlayer(state.activeRun, 'warmup', previousPlayer);
 		} catch (error) {
 			failCanonicalRun(String(error && error.message ? error.message : error));
@@ -2186,6 +2210,7 @@
 		state.runRequestSequence = Math.max(state.runRequestSequence, requestId);
 		state.pendingRun = {
 			requestId,
+			allocatorSlot: state.runRequestSequence % CANONICAL_ALLOCATOR_SLOTS,
 			level: options.level == null ? null : Math.max(0, Math.floor(Number(options.level) || 0)),
 			followCurrentLevel: options.level == null || !!options.followCurrentLevel,
 			seed: Number.isFinite(Number(options.seed)) ? Math.trunc(Number(options.seed)) | 0 : DEFAULT_GAMEPLAY_SEED,
@@ -2246,16 +2271,15 @@
 				resetDeterministicClock();
 				try {
 					const previousPlayer = gmPlayer();
-					if (
-						!startLevelDirect(run.level, {
-							instances: FINAL_INSTANCE_BASE,
-							tiles: FINAL_TILE_BASE
-						})
-					) {
+					if (!startLevelDirect(
+						run.level,
+						canonicalStageAllocator(run, FINAL_INSTANCE_BASE, FINAL_TILE_BASE)
+					)) {
 						if (!canonicalGameplayEnvironmentReady()) deferCanonicalRunUntilGameplay(run);
 						else failCanonicalRun('Unable to construct the canonical gameplay state');
 						return;
 					}
+					pumpCanonicalPreparationFrame(run);
 					waitForCanonicalPlayer(run, 'final', previousPlayer);
 				} catch (error) {
 					failCanonicalRun(String(error && error.message ? error.message : error));
@@ -2276,11 +2300,16 @@
 			failCanonicalRun('Unable to bootstrap the canonical physics state');
 			return;
 		}
+		resetDeterministicClock();
 		if (!resetGameMakerRuntimeState()) {
 			failCanonicalRun('Unable to canonicalize the tick-zero runtime state');
 			return;
 		}
 		armReplay(run.script, { exact: run.exact });
+		// Match the exact verifier's replay initialization order. In particular,
+		// negative-frame U entries must begin from a fresh freeze lifecycle so all
+		// requested prestart physics ticks run before frame 0 input is released.
+		resetFreeze(run.level);
 		state.activeRun = null;
 		state.canonicalStage = 'running';
 		post('RUN_READY', {

@@ -40,8 +40,8 @@ finish, standard point, and narrow-window idle point searches. It also includes
 frame-zero and long-prestart regressions on Levels 2 and 9, a Level 3 Point
 regression where a hidden stale Max Frames value exceeds the scoring window, and
 Level 8 early- and late-window joint-spawn regressions, plus a Level 5
-snapshot-proxy wakeup regression, both Level 12 negative-prestart timed-body
-regressions, and the exact Level 15 body-destruction route: 90 combinations total.
+snapshot-proxy wakeup regression, three Level 12 negative-prestart timed-body
+regressions, and the exact Level 15 body-destruction route: 91 combinations total.
 
 The moving-object matrix performs frame-by-frame parity checks from frame 550
 through frame 929 on every level. A dedicated Level 13 regression also covers
@@ -87,6 +87,9 @@ CDP_PORT=9440 \
 
 CDP_PORT=9440 \
   node native/circloo-sim/tools/test_level13_moving_checkpoint_parity.mjs
+
+CDP_PORT=9440 \
+  node native/circloo-sim/tools/test_use_best_replay.mjs
 ```
 
 The benchmark uses the same UI and adaptive worker pool as production:

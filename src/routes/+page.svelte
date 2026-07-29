@@ -70,6 +70,7 @@
 	let volume = $state(0.8);
 	let gameSpeed = $state(1);
 	let pendingReplayWhileFrozen = false;
+	let pendingReplayLevel: number | undefined;
 	let scriptText = $state(defaultText);
 	let errorText = $state('');
 	let toastText = $state('');
@@ -96,6 +97,7 @@
 	let bruteforce = $state({
 		running: false,
 		best: [] as ScriptEntry[],
+		bestLevel: null as number | null,
 		bestScore: Infinity,
 		trials: 0,
 		rate: 0,
@@ -212,8 +214,10 @@
 		localStorage.setItem(gameSpeedKey, String(gameSpeed));
 		postToGame('SET_GAME_SPEED', { speed: gameSpeed });
 		if (wasFrozen && gameSpeed > 0 && pendingReplayWhileFrozen) {
+			const replayLevel = pendingReplayLevel;
 			pendingReplayWhileFrozen = false;
-			syncReplayFromEditor(scriptText, true);
+			pendingReplayLevel = undefined;
+			syncReplayFromEditor(scriptText, true, replayLevel);
 		}
 	}
 
@@ -251,31 +255,52 @@
 		}, 2200);
 	}
 
-	function syncReplayFromEditor(text = scriptText, immediate = false) {
+	function syncReplayFromEditor(text = scriptText, immediate = false, replayLevel?: number) {
 		window.clearTimeout(replayTimer);
 		const script = normalizeScript(text);
 		const hasActiveInput = text.trim() && script.some((entry) => entry.input !== '.');
 		if (!hasActiveInput) {
+			pendingReplayWhileFrozen = false;
+			pendingReplayLevel = undefined;
 			postToGame('STOP_REPLAY');
 			return;
 		}
-		if (!telemetry.ready) return;
-		if (telemetry.playbackMode && (telemetry.paused || gameSpeed === 0)) {
+		const explicitReplayLevel = replayLevel === undefined
+			? undefined
+			: Math.max(0, Math.floor(Number(replayLevel) || 0));
+		if (!telemetry.ready) {
+			if (explicitReplayLevel !== undefined) {
+				pendingReplayWhileFrozen = true;
+				pendingReplayLevel = explicitReplayLevel;
+			}
+			return;
+		}
+		if (
+			telemetry.playbackMode &&
+			(telemetry.paused || gameSpeed === 0) &&
+			explicitReplayLevel === undefined
+		) {
 			pendingReplayWhileFrozen = false;
+			pendingReplayLevel = undefined;
 			postToGame('SET_SCRIPT', { script });
 			return;
 		}
 		if (telemetry.paused || gameSpeed === 0) {
 			pendingReplayWhileFrozen = true;
+			pendingReplayLevel = explicitReplayLevel;
 			return;
 		}
+		pendingReplayWhileFrozen = false;
+		pendingReplayLevel = undefined;
+		const resolvedReplayLevel =
+			explicitReplayLevel ?? (telemetry.gameplayReady ? telemetry.level : null);
 
 		const requestId = ++replayRequestId;
 		const start = () => {
 			postToGame('RUN_REPLAY', {
 				requestId,
-				level: telemetry.gameplayReady ? telemetry.level : null,
-				followCurrentLevel: !telemetry.gameplayReady,
+				level: resolvedReplayLevel,
+				followCurrentLevel: resolvedReplayLevel === null,
 				seed: 0,
 				script
 			});
@@ -284,10 +309,10 @@
 		else replayTimer = window.setTimeout(start, 120);
 	}
 
-	function setScriptText(nextText: string) {
+	function setScriptText(nextText: string, replayLevel?: number) {
 		scriptText = nextText;
 		localStorage.setItem(scriptKey, scriptText);
-		syncReplayFromEditor(scriptText);
+		syncReplayFromEditor(scriptText, false, replayLevel);
 	}
 
 	function handleScriptInput(event: Event) {
@@ -336,6 +361,7 @@
 		if (settings.target !== 'point') pointPicking = false;
 		if (!bruteforce.running && !preserveResults) {
 			bruteforce.best = [];
+			bruteforce.bestLevel = null;
 			bruteforce.bestScore = Infinity;
 			bruteforce.trials = 0;
 			bruteforce.rate = 0;
@@ -473,7 +499,12 @@
 						? `Improved to ${formatDistance(bestReport.report.bestScore)} px`
 						: `Improved to ${gameTime(bestReport.report.bestScore)}`
 				);
-				if (settings.autoUseBest) setScriptText(serializeScript(bestReport.script));
+				if (settings.autoUseBest) {
+					setScriptText(
+						serializeScript(bestReport.script),
+						bruteforce.bestLevel ?? undefined
+					);
+				}
 			}
 		}
 	}
@@ -627,9 +658,11 @@
 
 		settings = normalizedBruteforceSettings(settings);
 		saveSettings();
-		setScriptText(serializeScript(base));
+		const level = bruteforceLevel();
+		setScriptText(serializeScript(base), level);
 		bruteforce.running = true;
 		bruteforce.best = base;
+		bruteforce.bestLevel = level;
 		bruteforce.bestScore = Infinity;
 		bruteforce.trials = 0;
 		bruteforce.rate = 0;
@@ -640,7 +673,6 @@
 		retiredTrials = 0;
 		nextBruteforceWorkerId = 0;
 		const generation = ++bruteforceGeneration;
-		const level = bruteforceLevel();
 		const workerSettings = { ...settings };
 		setStatus('Starting adaptive bruteforce pool');
 		createBruteforceWorker(base, level, workerSettings);
@@ -658,8 +690,13 @@
 
 	function useBest() {
 		const best = validateNormalizedScript(bruteforce.best);
-		if (!best?.length) return setError('No valid bruteforce best script yet');
-		setScriptText(serializeScript(best));
+		if (!best?.length || !Number.isFinite(bruteforce.bestScore)) {
+			return setError('No valid bruteforce best script yet');
+		}
+		setScriptText(
+			serializeScript(best),
+			bruteforce.bestLevel ?? bruteforceLevel()
+		);
 		setStatus('Loaded bruteforce best');
 	}
 
@@ -707,7 +744,14 @@
 				postToGame('SET_VOLUME', { volume });
 				postToGame('SET_GAME_SPEED', { speed: gameSpeed });
 				syncPointTarget();
-				syncReplayFromEditor(scriptText, true);
+				if (pendingReplayWhileFrozen) {
+					const replayLevel = pendingReplayLevel;
+					pendingReplayWhileFrozen = false;
+					pendingReplayLevel = undefined;
+					syncReplayFromEditor(scriptText, true, replayLevel);
+				} else {
+					syncReplayFromEditor(scriptText, true);
+				}
 				break;
 			case 'RUN_READY':
 				if (message.requestId === replayRequestId) {
@@ -727,8 +771,10 @@
 				telemetry = message;
 				if (contextChanged) syncPointTarget();
 				if (resumed && pendingReplayWhileFrozen) {
+					const replayLevel = pendingReplayLevel;
 					pendingReplayWhileFrozen = false;
-					syncReplayFromEditor(scriptText, true);
+					pendingReplayLevel = undefined;
+					syncReplayFromEditor(scriptText, true, replayLevel);
 				}
 				break;
 			}

@@ -78,9 +78,31 @@ await call('Runtime.evaluate', {
   })()`,
   returnByValue: true
 });
-await call('Page.enable');
-await call('Page.reload', { ignoreCache: true });
-await new Promise((resolve) => setTimeout(resolve, 1000));
+await call('Runtime.evaluate', {
+  expression: 'location.reload(); true',
+  returnByValue: true
+});
+let pageReady = false;
+for (let attempt = 0; attempt < 600; attempt += 1) {
+  try {
+    const ready = await call('Runtime.evaluate', {
+      expression: `(() =>
+        document.readyState === 'complete' &&
+        document.querySelector('textarea[aria-label="TAS script"]')?.value === ${JSON.stringify(script)} &&
+        [...document.querySelectorAll('.bruteforce-settings .setting-label')].some(
+          (label) => label.textContent?.trim() === 'Checkpoint'
+        )
+      )()`,
+      returnByValue: true
+    }, 5000);
+    if (ready.result?.value === true) {
+      pageReady = true;
+      break;
+    }
+  } catch {}
+  await new Promise((resolve) => setTimeout(resolve, 100));
+}
+if (!pageReady) throw new Error('Use Best test page did not hydrate with stored settings');
 
 const expression = `(async () => {
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));

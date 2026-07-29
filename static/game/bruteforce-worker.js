@@ -983,6 +983,7 @@
 			return { optimizer: null, reason: 'wasm-capture-failed' };
 		}
 
+		const prestartConsumed = snapshotFrame === 0 && !!capture.prestartConsumed;
 		const model = W.CirclooWasmRuntime.modelFromInspection(capture.inspection, {
 			boundaryStates: capture.boundaryStates,
 			bodySpawnEvents: capture.bodySpawnEvents,
@@ -1019,6 +1020,8 @@
 				growthModelComplete,
 				requiredGrowthPatches,
 				capturedGrowthPatches,
+				prestartConsumed,
+				prestartPumps: Number(capture.prestartPumps) || 0,
 				bodyUpdateEvents: capture.bodyUpdateEvents,
 				frameBodyUpdates: (model.framePatches || []).map((patch) => ({
 					frame: patch.frame,
@@ -1146,9 +1149,11 @@
 
 		function createSequenceInputState(candidateScript) {
 			const unfreeze = normalizeScript(candidateScript).find((entry) => entry.input === 'U');
-			const prestartSteps = unfreeze
-				? Math.max(1, Math.abs(finiteFrame(unfreeze.frame, 0)))
-				: 0;
+			const prestartSteps = prestartConsumed
+				? 0
+				: unfreeze
+					? Math.max(1, Math.abs(finiteFrame(unfreeze.frame, 0)))
+					: 0;
 			const timerStarted =
 				!!(model && model.lifecycle && model.lifecycle.initialTimerStarted) || snapshotFrame > 0;
 			if (timerStarted) {
